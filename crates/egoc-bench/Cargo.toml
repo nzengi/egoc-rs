@@ -1,0 +1,18 @@
+[package]
+name    = "egoc-bench"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+
+[dev-dependencies]
+egoc-field  = { workspace = true }
+egoc-sl2    = { workspace = true }
+egoc-commit = { workspace = true }
+egoc-proof  = { workspace = true }
+egoc-ivc    = { workspace = true }
+criterion   = { workspace = true }
+rand        = { workspace = true }
+
+[[bench]]
+name    = "egoc_bench"
+harness = false

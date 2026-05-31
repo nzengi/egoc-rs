@@ -1,0 +1,14 @@
+[package]
+name        = "egoc-ivc"
+description = "E-GOC Nova-style additive IVC fold scheme"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+
+[dependencies]
+egoc-field  = { workspace = true }
+egoc-sl2    = { workspace = true }
+egoc-commit = { workspace = true }
+egoc-proof  = { workspace = true }
+rand        = { workspace = true }
+thiserror   = { workspace = true }

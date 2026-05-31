@@ -1,0 +1,15 @@
+[package]
+name        = "egoc-field"
+description = "Fq prime-field arithmetic for E-GOC (constant-time)"
+version.workspace    = true
+edition.workspace    = true
+authors.workspace    = true
+
+[dependencies]
+subtle   = { workspace = true }
+zeroize  = { workspace = true }
+rand     = { workspace = true }
+thiserror = { workspace = true }
+
+[features]
+default = []

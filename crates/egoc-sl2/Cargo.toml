@@ -1,0 +1,13 @@
+[package]
+name        = "egoc-sl2"
+description = "SL(2,Fq) group elements and operations for E-GOC"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+
+[dependencies]
+egoc-field = { workspace = true }
+subtle     = { workspace = true }
+zeroize    = { workspace = true }
+rand       = { workspace = true }
+thiserror  = { workspace = true }

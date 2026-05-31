@@ -1,0 +1,16 @@
+[package]
+name        = "egoc-proof"
+description = "E-GOC Sigma protocol + Fiat-Shamir NIZKP"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+
+[dependencies]
+egoc-field  = { workspace = true }
+egoc-sl2    = { workspace = true }
+egoc-commit = { workspace = true }
+subtle      = { workspace = true }
+zeroize     = { workspace = true }
+rand        = { workspace = true }
+blake3      = { workspace = true }
+thiserror   = { workspace = true }
