@@ -147,6 +147,116 @@
 
 ---
 
+## Phase 4 — Foundational Research (Open-Ended)
+
+> These are not engineering tasks. They are open research questions
+> specific to E-GOC's algebraic structure. No external framework applies.
+> Progress here would constitute original cryptographic contributions.
+
+### 4.1 Algebraic Non-Interactivity — Native Fiat-Shamir Alternative
+
+> **Motivation.** Fiat-Shamir + BLAKE3 is a general technique: it works
+> for *any* Sigma protocol by replacing the verifier's challenge with a
+> hash. It is not derived from E-GOC's algebra. The question is whether
+> SL(2,Fq)'s own algebraic invariants can produce the challenge —
+> eliminating the hash oracle entirely and yielding a **purely algebraic,
+> hash-free NIZKP** native to non-abelian group-orbit commitments.
+
+**Research questions:**
+
+- **Trace-based challenge:** Can `e = tr(L(m,r)·g) mod q` serve as a
+sound non-interactive challenge? Threat: can a prover bias `k_m, k_r`
+to control `tr(A + e·C)` before committing? Formal analysis required.
+- **Commutator-based challenge:** Can `e = tr([L(m,r), g]) mod q`
+(the commutator trace, measuring non-commutativity) be used?
+This is intrinsic to the non-abelian structure of SL(2,Fq) — no hash needed.
+- **SSP shadow coordinate as oracle:** The shadow map σ: SL(2,Fq) → Fq
+is deterministic and hard to invert. Can σ(L(m,r)·g) function as a
+one-way challenge without a ROM assumption?
+- **Security model:** If algebraic challenge works, what replaces ROM?
+Does non-abelian hardness of SSP provide a native soundness argument?
+- **EasyCrypt:** Mechanise the new soundness proof; compare to existing
+ROM lemmas in `egoc_security_v9.ec`.
+
+**Success criterion:** A provably sound NIZKP for E-GOC with no hash
+function and no random oracle assumption — soundness derived purely from
+SSP hardness over SL(2,Fq).
+
+**If successful:** This would be the first hash-free, purely algebraic
+non-interactive ZK proof over a non-abelian group. A qualitatively
+different result from all existing SNARK/STARK constructions.
+
+---
+
+### 4.2 Conjugation-Based Non-Abelian Sigma Protocol
+
+> **Motivation.** The current Sigma protocol uses F_q additive responses
+> (`z = k + e·m`). SL(2,Fq)'s non-abelian structure appears only in the
+> binding — not in the proof mechanism itself. Conjugation homomorphism
+> (`g·(K·W)·g⁻¹ = (g·K·g⁻¹)·(g·W·g⁻¹)`) enables a Sigma protocol
+> where the response is a group multiplication, not a field addition.
+> This would make E-GOC's ZK proof native to SL(2,Fq) multiplication.
+>
+> **Committee verdict (A1, A4, A6):** Mathematically feasible for CSP
+> (Conjugacy Search Problem). However, three risks must be resolved first.
+
+**Research questions:**
+
+- **Linear representation attack resistance:** SL(2,Fq) has short
+linear representations — do Lim–Lee or similar attacks break CSP
+at small q? Empirical test at q=101, q=257, q=65537.
+- **SSP vs CSP:** Current E-GOC hardness is SSP (shadow separation).
+CSP (conjugacy search) is a different problem. Are they equivalent
+over SL(2,Fq)? Can SSP reduce to CSP or vice versa?
+- **Commitment redesign:** CSP-based ZK requires witness `W ∈ SL(2,Fq)`,
+commitment `C = g·W·g⁻¹`. Current E-GOC witness is `(m,r) ∈ Fq^n × Fq^n`.
+What is the map from `(m,r)` to a group element? Does L(m,r) work?
+- **Binary challenge soundness:** Conjugation Sigma gives soundness `1/2`
+per round. To reach 128-bit security without a hash: 128 rounds.
+Is this acceptable, or does it require a large challenge space solution?
+
+**Prerequisite for 4.3:** Results from CSP security analysis feed into 4.3.
+
+---
+
+### 4.3 Large Challenge Space Non-Abelian ZK
+
+> **Motivation.** The binary challenge limitation of conjugation Sigma
+> (§4.2) collapses soundness to `1/2` per round. E-GOC currently achieves
+> `1/q` soundness with a single round using F_q challenge space. The
+> question is whether a non-abelian group response can be combined with
+> a large (`|Fq|`-sized) challenge space without falling back to additive
+> field arithmetic for the response.
+>
+> **Committee verdict (A2, A3, A5):** Open problem. No known construction
+> achieves both simultaneously. Binary challenge is the natural limit of
+> group-multiplicative responses. Solving this would be a fundamental
+> result in non-abelian ZK theory.
+
+**Research questions:**
+
+- **Algebraic challenge + group response:** Can challenge `e ∈ Fq`
+(large space) be combined with response `Z = K · W^e ∈ SL(2,Fq)`?
+Verification equation: what does `g·(K·W^e)·g⁻¹ = A · C^e` require
+in terms of commutativity? Does non-abelian structure break it?
+- **Partial non-abelian:** Response `(Z_group, z_field)` — group
+component for gauge, field component for witness scalars. Hybrid:
+non-abelian where SL(2,Fq) acts, additive where F_q acts. Is this
+a meaningful improvement over the current pure-additive approach?
+- **Performance bound:** Group exponentiation `W^e` for `e ∈ Fq`
+costs `O(log q)` SL(2,Fq) multiplications. At q=257: ~8 multiplications.
+Compare to current single F_q multiply. Is the overhead acceptable?
+- **New security model:** If this works, the proof is no longer in
+the Fiat-Shamir paradigm. What security model captures it?
+Standard model? Generic group model?
+
+**Success criterion:** A single-round ZK proof for E-GOC where both the
+challenge space is `|Fq|` AND the response uses SL(2,Fq) group operations.
+If achieved: proof mechanism and binding mechanism live in the same
+non-abelian algebraic world — E-GOC becomes fully native end-to-end.
+
+---
+
 ## Commit Procedure
 
 ```

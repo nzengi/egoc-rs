@@ -157,14 +157,13 @@ fn bench_blake3(c: &mut Criterion) {
         bench.iter(|| gauge_hash(black_box(&g)))
     });
 
-    // fiat_shamir_challenge — u128 reduction (Phase-0 fix: was u64)
+    // fiat_shamir_challenge — q derived from CommitMatrix (no raw q param)
     group.bench_function("fiat_shamir_u128", |bench| {
         bench.iter(|| {
             fiat_shamir_challenge(
                 black_box(&cmt.matrix),
                 black_box(&g),
                 black_box(&pf.a_rows),
-                PRIM_Q,
             )
         })
     });

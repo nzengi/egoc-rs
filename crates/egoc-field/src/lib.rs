@@ -14,15 +14,36 @@ use subtle::{Choice, ConditionallySelectable, ConstantTimeEq, CtOption};
 use zeroize::Zeroize;
 
 // ---------------------------------------------------------------------------
-// Error type
+// Error types
 // ---------------------------------------------------------------------------
 
+/// Error from field arithmetic.
 #[derive(Debug, thiserror::Error)]
 pub enum FieldError {
     #[error("modular inverse does not exist (input is zero or gcd != 1)")]
     NoInverse,
     #[error("invalid field element: {0} >= q={1}")]
     OutOfRange(u64, u64),
+}
+
+/// Unified top-level error type for all E-GOC operations.
+#[derive(Debug, thiserror::Error)]
+pub enum EgocError {
+    /// Security parameter validation failure.
+    #[error("parameter error: {0}")]
+    Param(#[from] ParamError),
+    /// Field arithmetic error.
+    #[error("field error: {0}")]
+    Field(#[from] FieldError),
+    /// Witness construction error.
+    #[error("witness error: {0}")]
+    Witness(String),
+    /// Proof serialization / deserialization error.
+    #[error("proof error: {0}")]
+    Proof(String),
+    /// IVC fold compatibility error.
+    #[error("fold error: {0}")]
+    Fold(String),
 }
 
 // ---------------------------------------------------------------------------

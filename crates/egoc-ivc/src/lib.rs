@@ -21,7 +21,7 @@
 //! E-GOC fold is native to SL(2,Fq) structure, not a general SNARK technique.
 
 use egoc_commit::{commit, verify, Commitment, Witness};
-use egoc_field::Fp;
+use egoc_field::{EgocError, Fp};
 use egoc_proof::{prove, verify_proof, Proof};
 use egoc_sl2::SL2;
 
@@ -39,13 +39,26 @@ pub struct FoldResult {
 
 /// Fold two (witness, commitment) pairs sharing the same gauge g.
 ///
+/// Returns `Err` if `w1` and `w2` have incompatible `n` or `q`.
+///
 /// m_fold = m1 + m2 (mod q),  r_fold = r1 + r2 (mod q)
 /// C_fold = C1 + C2 (mod q)   = L(m_fold, r_fold)·g
 pub fn ivc_fold(
     w1: &Witness, w2: &Witness,
     g:  &SL2,
     rng: &mut impl rand::RngCore,
-) -> FoldResult {
+) -> Result<FoldResult, EgocError> {
+    if w1.n != w2.n {
+        return Err(EgocError::Fold(format!(
+            "witness n mismatch: {} vs {}", w1.n, w2.n
+        )));
+    }
+    if w1.q != w2.q {
+        return Err(EgocError::Fold(format!(
+            "witness q mismatch: {} vs {}", w1.q, w2.q
+        )));
+    }
+
     // Additive fold of witnesses
     let m_fold: Vec<Fp> = w1.m.iter().zip(w2.m.iter()).map(|(a, b)| a.add(*b)).collect();
     let r_fold: Vec<Fp> = w1.r.iter().zip(w2.r.iter()).map(|(a, b)| a.add(*b)).collect();
@@ -56,10 +69,10 @@ pub fn ivc_fold(
 
     // Fresh NIZKP for the folded witness
     let proof_fold = prove(&witness_fold, g, &commit_fold.matrix, rng);
-    let valid      = verify_proof(&commit_fold.matrix, g, &proof_fold)
-                     && verify(&witness_fold, g, &commit_fold);
+    let valid = verify_proof(&commit_fold.matrix, g, &proof_fold).is_ok()
+             && verify(&witness_fold, g, &commit_fold).is_ok();
 
-    FoldResult { witness_fold, commit_fold, proof_fold, valid }
+    Ok(FoldResult { witness_fold, commit_fold, proof_fold, valid })
 }
 
 // ---------------------------------------------------------------------------
@@ -77,12 +90,16 @@ pub struct TreeFoldResult {
 }
 
 /// Fold N statements in a binary tree. All must share the same gauge g.
+///
+/// Returns `Err` if any witness pair has incompatible parameters.
 pub fn tree_fold(
-    witnesses:   Vec<Witness>,
-    g:           &SL2,
-    rng:         &mut impl rand::RngCore,
-) -> TreeFoldResult {
-    assert!(!witnesses.is_empty(), "need at least one witness");
+    witnesses: Vec<Witness>,
+    g:         &SL2,
+    rng:       &mut impl rand::RngCore,
+) -> Result<TreeFoldResult, EgocError> {
+    if witnesses.is_empty() {
+        return Err(EgocError::Fold("need at least one witness".into()));
+    }
     let q     = witnesses[0].q;
     let depth = (witnesses.len() as f64).log2().ceil() as usize;
 
@@ -94,7 +111,7 @@ pub fn tree_fold(
         let mut i = 0;
         while i < cur.len() {
             if i + 1 < cur.len() {
-                let fold = ivc_fold(&cur[i], &cur[i + 1], g, rng);
+                let fold = ivc_fold(&cur[i], &cur[i + 1], g, rng)?;
                 all_valid &= fold.valid;
                 next.push(fold.witness_fold);
                 i += 2;
@@ -109,15 +126,15 @@ pub fn tree_fold(
     // Final proof for the single remaining witness
     let final_commit = commit(&cur[0], g);
     let final_proof  = prove(&cur[0], g, &final_commit.matrix, rng);
-    all_valid &= verify_proof(&final_commit.matrix, g, &final_proof);
+    all_valid &= verify_proof(&final_commit.matrix, g, &final_proof).is_ok();
 
-    TreeFoldResult {
+    Ok(TreeFoldResult {
         final_proof,
         final_commit,
         depth,
         all_valid,
         soundness_err: (depth, q),
-    }
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -140,8 +157,17 @@ mod tests {
         let w1 = Witness::random(N, Q, &mut rng);
         let w2 = Witness::random(N, Q, &mut rng);
         let g  = random_sl2(Q, &mut rng);
-        let r  = ivc_fold(&w1, &w2, &g, &mut rng);
+        let r  = ivc_fold(&w1, &w2, &g, &mut rng).expect("fold ok");
         assert!(r.valid);
+    }
+
+    #[test]
+    fn fold_incompatible_q_fails() {
+        let mut rng = StdRng::seed_from_u64(42);
+        let w1 = Witness::random(N, Q, &mut rng);        // q=101
+        let w2 = Witness::random(N, 97, &mut rng);       // q=97 — different
+        let g  = random_sl2(Q, &mut rng);
+        assert!(ivc_fold(&w1, &w2, &g, &mut rng).is_err());
     }
 
     #[test]
@@ -149,14 +175,14 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(7);
         let g = random_sl2(Q, &mut rng);
         let ws: Vec<Witness> = (0..8).map(|_| Witness::random(N, Q, &mut rng)).collect();
-        let r = tree_fold(ws, &g, &mut rng);
+        let r = tree_fold(ws, &g, &mut rng).expect("tree fold ok");
         assert!(r.all_valid);
         assert_eq!(r.depth, 3);
-        // soundness_err = (depth=3, q=101) → 3/101 ≈ 0.030 < 0.1 ✓
+        // soundness_err = (depth=3, q=257) → 3/257 ≈ 0.012 < 0.1 ✓
         let (num, den) = r.soundness_err;
         assert_eq!(num, 3);
         assert_eq!(den, Q);
-        assert!(num < (den / 10) as usize); // 3 < 10
+        assert!(num < (den / 10) as usize); // 3 < 25
     }
 
     #[test]

@@ -11,7 +11,7 @@
 //! `commit` includes H(g) so that L(-m,-r)·(-g) = L(m,r)·g
 //! cannot produce a collision: H(-g) ≠ H(g) (BLAKE3 collision resistance).
 
-use egoc_field::Fp;
+use egoc_field::{EgocError, EgocParams, Fp};
 use egoc_sl2::SL2;
 use subtle::{Choice, ConstantTimeEq};
 use zeroize::{Zeroize, ZeroizeOnDrop};
@@ -30,16 +30,76 @@ pub struct Witness {
 }
 
 impl Witness {
+    /// Construct a witness from raw vectors.
+    ///
+    /// Panics in debug mode if `m` is empty or `m.len() != r.len()`.
+    /// For validated construction, prefer [`Witness::from_params`].
     pub fn new(m: Vec<Fp>, r: Vec<Fp>) -> Self {
+        debug_assert!(!m.is_empty(), "witness m must be non-empty");
+        debug_assert_eq!(m.len(), r.len(), "m and r must have equal length");
         let n = m.len();
         let q = m[0].q();
         Self { m, r, n, q }
     }
 
+    /// Construct and validate a witness against `EgocParams`.
+    ///
+    /// Returns `Err` if:
+    /// - `m.len() != params.n` or `r.len() != params.n`
+    /// - any element has a different modulus than `params.q`
+    pub fn from_params(
+        params: &EgocParams,
+        m: Vec<Fp>,
+        r: Vec<Fp>,
+    ) -> Result<Self, EgocError> {
+        if m.len() != params.n {
+            return Err(EgocError::Witness(format!(
+                "m.len()={} != params.n={}", m.len(), params.n
+            )));
+        }
+        if r.len() != params.n {
+            return Err(EgocError::Witness(format!(
+                "r.len()={} != params.n={}", r.len(), params.n
+            )));
+        }
+        for (i, v) in m.iter().chain(r.iter()).enumerate() {
+            if v.q() != params.q {
+                return Err(EgocError::Witness(format!(
+                    "element[{}] has q={} but params.q={}", i, v.q(), params.q
+                )));
+            }
+        }
+        Ok(Self::new(m, r))
+    }
+
+    /// Validate this witness against the given `EgocParams`.
+    pub fn validate(&self, params: &EgocParams) -> Result<(), EgocError> {
+        if self.n != params.n {
+            return Err(EgocError::Witness(format!(
+                "witness n={} != params.n={}", self.n, params.n
+            )));
+        }
+        if self.q != params.q {
+            return Err(EgocError::Witness(format!(
+                "witness q={} != params.q={}", self.q, params.q
+            )));
+        }
+        Ok(())
+    }
+
+    /// Sample a random witness for the given parameters.
     pub fn random(n: usize, q: u64, rng: &mut impl rand::RngCore) -> Self {
         let m = egoc_field::random_vec(n, q, rng);
         let r = egoc_field::random_vec(n, q, rng);
         Self::new(m, r)
+    }
+
+    /// Sample a random witness for the given `EgocParams`.
+    pub fn random_from_params(
+        params: &EgocParams,
+        rng: &mut impl rand::RngCore,
+    ) -> Self {
+        Self::random(params.n, params.q, rng)
     }
 }
 
@@ -92,7 +152,6 @@ pub struct Commitment {
 /// Row 2i   = [m[i],  r[i]]
 /// Row 2i+1 = [r[i], -m[i]]
 pub fn lift(w: &Witness) -> Vec<[Fp; 2]> {
-    let _q = w.q;
     let mut rows = Vec::with_capacity(2 * w.n);
     for i in 0..w.n {
         rows.push([w.m[i], w.r[i]]);
@@ -128,12 +187,17 @@ pub fn commit(w: &Witness, g: &SL2) -> Commitment {
 
 /// Verify: recompute commit and compare, fully constant-time.
 ///
-/// All comparisons use `subtle::Choice` accumulation — no short-circuit
-/// branches on secret data.  Length mismatch is an early public-data exit
-/// (lengths are not secret).
-pub fn verify(w: &Witness, g: &SL2, cmt: &Commitment) -> bool {
+/// Returns `Ok(())` if the commitment is valid, `Err(EgocError::Witness(…))`
+/// with a reason otherwise.  All secret comparisons use `subtle::Choice`
+/// accumulation — no short-circuit branches on secret data.
+pub fn verify(w: &Witness, g: &SL2, cmt: &Commitment) -> Result<(), EgocError> {
     let expected = commit(w, g);
-    if expected.matrix.rows.len() != cmt.matrix.rows.len() { return false; }
+    if expected.matrix.rows.len() != cmt.matrix.rows.len() {
+        return Err(EgocError::Witness(format!(
+            "commitment row count mismatch: expected {}, got {}",
+            expected.matrix.rows.len(), cmt.matrix.rows.len()
+        )));
+    }
 
     // Accumulate matrix comparison with bitwise AND of Choice values.
     let mut ok = Choice::from(1u8);
@@ -144,7 +208,11 @@ pub fn verify(w: &Witness, g: &SL2, cmt: &Commitment) -> bool {
     // Constant-time 32-byte hash comparison via subtle.
     ok &= expected.gauge_hash.ct_eq(&cmt.gauge_hash);
 
-    bool::from(ok)
+    if bool::from(ok) {
+        Ok(())
+    } else {
+        Err(EgocError::Witness("commitment verification failed".into()))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -167,7 +235,7 @@ mod tests {
         let w = Witness::random(N, Q, &mut rng);
         let g = random_sl2(Q, &mut rng);
         let cmt = commit(&w, &g);
-        assert!(verify(&w, &g, &cmt));
+        assert!(verify(&w, &g, &cmt).is_ok());
     }
 
     #[test]
@@ -177,7 +245,21 @@ mod tests {
         let w2 = Witness::random(N, Q, &mut rng);
         let g  = random_sl2(Q, &mut rng);
         let cmt = commit(&w, &g);
-        assert!(!verify(&w2, &g, &cmt));
+        assert!(verify(&w2, &g, &cmt).is_err());
+    }
+
+    #[test]
+    fn from_params_validates_length() {
+        use egoc_field::{EgocParams, Fp};
+        let params = EgocParams::LEVEL1;
+        let mut rng = StdRng::seed_from_u64(77);
+        let w = Witness::random_from_params(&params, &mut rng);
+        assert!(w.validate(&params).is_ok());
+
+        // wrong length
+        let m_short = vec![Fp::zero(params.q); 3];
+        let r_ok    = vec![Fp::zero(params.q); params.n];
+        assert!(Witness::from_params(&params, m_short, r_ok).is_err());
     }
 
     #[test]

@@ -8,7 +8,7 @@
 //! - Perfect HVZK: simulator outputs uniform (z_m, z_r) ← Fq^n
 
 use egoc_commit::{lift, CommitMatrix, Witness};
-use egoc_field::Fp;
+use egoc_field::{EgocError, Fp};
 use egoc_sl2::SL2;
 use subtle::{Choice, ConstantTimeEq};
 use zeroize::{Zeroize, ZeroizeOnDrop};
@@ -133,14 +133,14 @@ static FS_DOMAIN_KEY: &[u8; 32] = b"egoc-fiat-shamir-challenge-v1   ";
 
 /// e = BLAKE3_keyed(domain ‖ C_bytes ‖ g_bytes ‖ A_bytes) mod (q-1) + 1 ∈ {1,..,q-1}.
 ///
-/// Uses `blake3::Hasher::new_keyed` for domain separation — prevents cross-protocol
-/// hash collisions and enables future protocol versioning without output overlap.
+/// `q` is derived from `c_mat.q` — no raw numeric parameter needed.
+/// Uses `blake3::Hasher::new_keyed` for domain separation.
 pub fn fiat_shamir_challenge(
     c_mat:  &CommitMatrix,
     g:      &SL2,
     a_rows: &[[Fp; 2]],
-    q:      u64,
 ) -> Fp {
+    let q = c_mat.q;
     let mut hasher = blake3::Hasher::new_keyed(FS_DOMAIN_KEY);
     hasher.update(&c_mat.to_bytes());
     hasher.update(&g.to_bytes());
@@ -196,7 +196,7 @@ pub fn prove(w: &Witness, g: &SL2, c_mat: &CommitMatrix, rng: &mut impl rand::Rn
     let a_rows    = mat_mul_2x2(&a_lift, g);
 
     // e = FS(C, g, A)
-    let e = fiat_shamir_challenge(c_mat, g, &a_rows, q);
+    let e = fiat_shamir_challenge(c_mat, g, &a_rows);
 
     // z_m[i] = k[i] + e * m[i],  z_r[i] = s[i] + e * r[i]
     let z_m: Vec<Fp> = k.iter().zip(w.m.iter()).map(|(ki, mi)| ki.add(e.mul(*mi))).collect();
@@ -215,14 +215,22 @@ pub fn prove(w: &Witness, g: &SL2, c_mat: &CommitMatrix, rng: &mut impl rand::Rn
 
 /// Verify NIZKP π for statement (C_mat, g).
 ///
+/// Returns `Ok(())` if valid, `Err(EgocError::Proof(…))` otherwise.
 /// Checks: L(z_m, z_r)·g  =  A + e·C_mat  (mod q)
-pub fn verify_proof(c_mat: &CommitMatrix, g: &SL2, proof: &Proof) -> bool {
-    let q = c_mat.q;
+pub fn verify_proof(
+    c_mat: &CommitMatrix,
+    g:     &SL2,
+    proof: &Proof,
+) -> Result<(), EgocError> {
     let n = proof.z_m.len();
-    if proof.a_rows.len() != 2 * n { return false; }
+    if proof.a_rows.len() != 2 * n {
+        return Err(EgocError::Proof(format!(
+            "a_rows.len()={} != 2*n={}", proof.a_rows.len(), 2 * n
+        )));
+    }
 
-    // Recompute e = FS(C, g, A)
-    let e = fiat_shamir_challenge(c_mat, g, &proof.a_rows, q);
+    // Recompute e = FS(C, g, A) — q derived from c_mat
+    let e = fiat_shamir_challenge(c_mat, g, &proof.a_rows);
 
     // LHS: L(z_m, z_r)·g
     let z_witness = Witness::new(proof.z_m.clone(), proof.z_r.clone());
@@ -230,7 +238,7 @@ pub fn verify_proof(c_mat: &CommitMatrix, g: &SL2, proof: &Proof) -> bool {
     let lhs       = mat_mul_2x2(&lhs_lift, g);
 
     // RHS: A + e·C_mat
-    let ec = mat_scale(c_mat.rows(), e);
+    let ec  = mat_scale(c_mat.rows(), e);
     let rhs = mat_add(&proof.a_rows, &ec);
 
     // Constant-time comparison — no short-circuit branches on secret data.
@@ -238,7 +246,12 @@ pub fn verify_proof(c_mat: &CommitMatrix, g: &SL2, proof: &Proof) -> bool {
     for (l, r) in lhs.iter().zip(rhs.iter()) {
         ok &= l[0].ct_eq(&r[0]) & l[1].ct_eq(&r[1]);
     }
-    bool::from(ok)
+
+    if bool::from(ok) {
+        Ok(())
+    } else {
+        Err(EgocError::Proof("proof verification equation failed".into()))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -323,7 +336,7 @@ mod tests {
         let g   = random_sl2(Q, &mut rng);
         let cmt = commit(&w, &g);
         let pf  = prove(&w, &g, &cmt.matrix, &mut rng);
-        assert!(verify_proof(&cmt.matrix, &g, &pf));
+        assert!(verify_proof(&cmt.matrix, &g, &pf).is_ok());
     }
 
     #[test]
@@ -334,7 +347,7 @@ mod tests {
         let g   = random_sl2(Q, &mut rng);
         let cmt = commit(&w1, &g);
         let pf  = prove(&w2, &g, &cmt.matrix, &mut rng);
-        assert!(!verify_proof(&cmt.matrix, &g, &pf));
+        assert!(verify_proof(&cmt.matrix, &g, &pf).is_err());
     }
 
     #[test]
@@ -344,8 +357,8 @@ mod tests {
         let g   = random_sl2(Q, &mut rng);
         let cmt = commit(&w, &g);
         let pf  = prove(&w, &g, &cmt.matrix, &mut rng);
-        let e1  = fiat_shamir_challenge(&cmt.matrix, &g, &pf.a_rows, Q);
-        let e2  = fiat_shamir_challenge(&cmt.matrix, &g, &pf.a_rows, Q);
+        let e1  = fiat_shamir_challenge(&cmt.matrix, &g, &pf.a_rows);
+        let e2  = fiat_shamir_challenge(&cmt.matrix, &g, &pf.a_rows);
         assert_eq!(e1, e2);
         assert!(e1.val() >= 1 && e1.val() < Q);
     }
@@ -367,7 +380,7 @@ mod tests {
 
         let pf2 = Proof::from_bytes(&bytes).expect("deserialize");
         // Deserialized proof must still verify
-        assert!(verify_proof(&cmt.matrix, &g, &pf2));
+        assert!(verify_proof(&cmt.matrix, &g, &pf2).is_ok());
     }
 
     #[test]
