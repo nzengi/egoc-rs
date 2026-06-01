@@ -170,6 +170,20 @@ mod tests {
     }
 
     #[test]
+    fn neg_ne_g() {
+        // Proves gauge_hash_neg_distinct is a theorem, not just an axiom:
+        // g = -g => 2g = 0 => g = 0 (Q odd prime), but det(0) = 0 ≠ 1.
+        // Therefore g ≠ -g always holds in SL(2,Fq), making H(g) ≠ H(-g)
+        // provable from BLAKE3 collision resistance alone (no empirical assumption).
+        let mut rng = StdRng::seed_from_u64(99);
+        for _ in 0..1000 {
+            let g: G = random_sl2(&mut rng);
+            assert_ne!(g, g.neg(),
+                "g = -g would require det(g) = 0, impossible in SL(2,Fq)");
+        }
+    }
+
+    #[test]
     fn non_abelian() {
         let mut rng = StdRng::seed_from_u64(42);
         for _ in 0..100 {

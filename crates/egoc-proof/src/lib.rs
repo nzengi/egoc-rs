@@ -209,15 +209,28 @@ pub fn prove<const Q: u64>(
     let mut k: Vec<Fp<Q>> = random_vec(n, rng);
     let mut s: Vec<Fp<Q>> = random_vec(n, rng);
 
-    // A = L(k,s)·g  —  typed as CommitMatrix<Q>
-    let k_witness = Witness::new(k.clone(), s.clone());
-    let a_lift    = lift(&k_witness);
-    let a         = CommitMatrix::from_rows(mat_mul_2x2(&a_lift, g));
+    // A = L(k,s)·g — computed in one pass, no intermediate clone or lift alloc.
+    //
+    // Lift rows: L[2i] = [k[i], s[i]], L[2i+1] = [s[i], -k[i]]
+    // Each row r -> [r[0]*g.a + r[1]*g.c, r[0]*g.b + r[1]*g.d]
+    //
+    // Fused lift+mul eliminates: k.clone(), s.clone(), a_lift Vec (3 allocs saved).
+    let mut a_rows: Vec<[Fp<Q>; 2]> = Vec::with_capacity(2 * n);
+    for i in 0..n {
+        let ki = k[i];
+        let si = s[i];
+        let neg_ki = ki.neg();
+        // even row: L[2i] = [k[i], s[i]]
+        a_rows.push([ki.mul(g.a).add(si.mul(g.c)), ki.mul(g.b).add(si.mul(g.d))]);
+        // odd row: L[2i+1] = [s[i], -k[i]]
+        a_rows.push([si.mul(g.a).add(neg_ki.mul(g.c)), si.mul(g.b).add(neg_ki.mul(g.d))]);
+    }
+    let a = CommitMatrix::from_rows(a_rows);
 
     // e = FS(C, g, A)
     let e = fiat_shamir_challenge(c_mat, g, &a);
 
-    // z_m[i] = k[i] + e·m[i],  z_r[i] = s[i] + e·r[i]
+    // z_m[i] = k[i] + e·m[i],  z_r[i] = s[i] + e·r[i]  — single pass each
     let z_m: Vec<Fp<Q>> = k.iter().zip(w.m.iter()).map(|(ki, mi)| ki.add(e.mul(*mi))).collect();
     let z_r: Vec<Fp<Q>> = s.iter().zip(w.r.iter()).map(|(si, ri)| si.add(e.mul(*ri))).collect();
 

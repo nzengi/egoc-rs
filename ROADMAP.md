@@ -200,6 +200,38 @@ different result from all existing SNARK/STARK constructions.
 > **Committee verdict (A1, A4, A6):** Mathematically feasible for CSP
 > (Conjugacy Search Problem). However, three risks must be resolved first.
 
+**Commutator Challenge Simulation Results (2026-06-02):**
+
+Simulation over q=101, 10000 samples tested `e = trace([g,h]) mod q` as a
+challenge function (see `egoc-rs/research_notes.md` for full output):
+
+- `trace([g,h])` produces all q distinct values — valid challenge range ✓
+- Distribution is NOT perfectly uniform: χ²=296 vs expected ~100, max bias 1.98x
+- P[trace([g,h]) = target] ≈ 1/q per random h — soundness error matches Fiat-Shamir
+- Adversary cannot fix a target trace without ≈q samples — not efficiently predictable
+
+**Protocol sketch (hash-free Sigma):**
+```
+Setup:  C = L(m,r)·g  (public)
+R1:     Prover picks k,s; A = L(k,s)·g; picks h ← SL(2,Fq); sends (A, h)
+Chall:  e = trace(g·h·g⁻¹·h⁻¹) mod q  [deterministic, no hash]
+R3:     z_m = k + e·m, z_r = s + e·r
+Verify: L(z_m,z_r)·g = A + e·C
+```
+
+**Critical binding problem identified:** Prover chooses h after committing A.
+If prover sees A first, they can sample h values to fix e to a chosen target
+(requiring ~q samples). This breaks soundness.
+Mitigation: bind h into the first round — e.g. send `(A, H(h))` before
+revealing h, or use `A = L(k,s)·g·h` to embed h algebraically in the commitment.
+The second option reintroduces h as an algebraic component — no hash needed
+for the challenge itself, only for the commitment binding.
+
+**Open problems:**
+- Is the trace distribution bias cryptographically significant? Formal analysis needed.
+- Does the h-binding solution preserve zero-knowledge?
+- Reduction: is trace([g,h]) unpredictability reducible to SSP or DLP in SL(2,Fq)?
+
 **Research questions:**
 
 - **Linear representation attack resistance:** SL(2,Fq) has short

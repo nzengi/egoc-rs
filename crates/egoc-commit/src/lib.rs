@@ -36,9 +36,26 @@ impl<const Q: u64> Witness<Q> {
     ///
     /// Panics in debug mode if `m` is empty or `m.len() != r.len()`.
     /// For validated construction, prefer [`Witness::from_params`].
+    ///
+    /// # Security — randomness requirement
+    ///
+    /// **`r` must be chosen uniformly at random for hiding to hold.**
+    ///
+    /// If `r = [0, …, 0]`, hiding is completely broken: any observer can
+    /// recover `m[i]` from the commitment as `m[i] = C[2i][0] · g.a⁻¹ mod q`.
+    /// Zero randomness is only safe for deterministic test vectors (KAT).
+    ///
+    /// Use [`Witness::random`] or [`Witness::random_from_params`] for
+    /// production witnesses — these always sample uniform `r`.
     pub fn new(m: Vec<Fp<Q>>, r: Vec<Fp<Q>>) -> Self {
         debug_assert!(!m.is_empty(), "witness m must be non-empty");
         debug_assert_eq!(m.len(), r.len(), "m and r must have equal length");
+        // Warn in debug builds when all randomness is zero — hiding is broken.
+        debug_assert!(
+            r.iter().any(|x| x.val() != 0),
+            "Witness r=[0..0]: hiding is completely broken — use random r in production. \
+             For test vectors only."
+        );
         let n = m.len();
         Self { m, r, n }
     }
@@ -294,6 +311,41 @@ mod tests {
         let w2: W = Witness::random(N, &mut rng);
         let g:  G = random_sl2(&mut rng);
         assert_ne!(commit(&w1, &g).matrix.rows, commit(&w2, &g).matrix.rows);
+    }
+
+    #[test]
+    fn witness_zero_r_hiding_broken() {
+        // Demonstrates: r=[0..0] completely breaks hiding.
+        // m[i] can be recovered from C[2i][0] as m[i] = C[2i][0] * g.a^{-1} mod Q.
+        // Construct directly (bypassing debug_assert) to test the attack itself.
+        let mut rng = StdRng::seed_from_u64(0);
+        let g: G = random_sl2(&mut rng);
+
+        let m_vals: Vec<Fp<101>> = (1u64..=N as u64).map(Fp::new).collect();
+        let r_zero: Vec<Fp<101>> = vec![Fp::zero(); N];
+
+        // Direct construction — bypasses new() to allow r=0 in test context.
+        let w = Witness::<101> { m: m_vals.clone(), r: r_zero, n: N };
+        let cmt = commit(&w, &g);
+
+        // Recover: C[2i] = [m[i]*g.a, m[i]*g.b], so m[i] = C[2i][0] * g.a^{-1}
+        let ga_inv = g.a.invert().expect("g.a invertible");
+        for i in 0..N {
+            let row_even = cmt.matrix.rows()[2 * i];
+            let recovered = row_even[0].mul(ga_inv);
+            assert_eq!(recovered, m_vals[i],
+                "m[{i}] recoverable from commitment when r=0 — hiding is broken");
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "hiding is completely broken")]
+    #[cfg(debug_assertions)]
+    fn witness_new_zero_r_asserts_in_debug() {
+        // debug_assert! in Witness::new() must fire when r=[0..0].
+        let m: Vec<Fp<101>> = (1u64..=4).map(Fp::new).collect();
+        let r: Vec<Fp<101>> = vec![Fp::zero(); 4];
+        let _ = Witness::<101>::new(m, r);
     }
 
     #[test]
