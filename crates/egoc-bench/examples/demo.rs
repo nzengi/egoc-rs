@@ -236,7 +236,9 @@ fn main() {
     println!("  g = [[{}, {}], [{}, {}]]  (det=1)", kg.a.val(), kg.b.val(), kg.c.val(), kg.d.val());
     println!();
 
-    let kat_w   = egoc::Witness::<Q>::new(kat_m, kat_r);
+    // Direct construction — bypasses debug_assert for this intentional r=0 test vector.
+    // KAT vectors use zero randomness by design for determinism; hiding is intentionally absent.
+    let kat_w   = egoc::Witness::<Q> { m: kat_m, r: kat_r, n: kat_session.params.n };
     let kat_cmt = kat_session.commit(&kat_w);
 
     println!("  Commitment matrix C = L(m,r)·g:");
