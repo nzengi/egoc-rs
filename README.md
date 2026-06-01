@@ -11,7 +11,7 @@ egoc-rs/
 │   ├── egoc-sl2      # SL(2,Fq) group, random sampling      [D2]
 │   ├── egoc-commit   # lift / commit / verify + gauge hash   [D3]
 │   ├── egoc-proof    # Sigma protocol + Fiat-Shamir BLAKE3   [D4]
-│   ├── egoc-ivc      # Nova-style additive fold              [D5]
+│   ├── egoc-ivc      # Additive fold (L-linearity native)     [D5]
 │   └── egoc-bench    # Criterion benchmarks                  [D6]
 ```
 

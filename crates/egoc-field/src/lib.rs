@@ -196,6 +196,95 @@ pub fn random_vec(n: usize, q: u64, rng: &mut impl rand::RngCore) -> Vec<Fp> {
 }
 
 // ---------------------------------------------------------------------------
+// EgocParams — security parameter set with validation  (A5 Bernstein)
+// ---------------------------------------------------------------------------
+
+/// Security parameter set for E-GOC.
+///
+/// # Security level
+/// Paper §8: `(2n - 3) · ⌊log₂q⌋ ≥ λ` bits.
+/// For NIST Level I (λ=128): n=10, q=257 → (17)·8 = 136 bits ✓
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EgocParams {
+    /// Number of message/randomness elements (n ≥ 2).
+    pub n: usize,
+    /// Field prime (q ≥ 5, q prime).
+    pub q: u64,
+}
+
+/// Error returned by `EgocParams::validate`.
+#[derive(Debug, thiserror::Error)]
+pub enum ParamError {
+    #[error("n must be ≥ 2, got {0}")]
+    NTooSmall(usize),
+    #[error("q must be ≥ 5, got {0}")]
+    QTooSmall(u64),
+    #[error("security level {got} bits < required {need} bits")]
+    InsufficientSecurity { got: u32, need: u32 },
+}
+
+impl EgocParams {
+    /// Construct and validate parameters.
+    pub fn new(n: usize, q: u64) -> Result<Self, ParamError> {
+        let p = Self { n, q };
+        p.validate()?;
+        Ok(p)
+    }
+
+    /// Security level in bits: `(2n - 3) · ⌊log₂q⌋`.
+    ///
+    /// Derived from the SSP hardness bound in paper §8.
+    pub fn security_bits(&self) -> u32 {
+        let factor = (2 * self.n).saturating_sub(3) as u32;
+        factor * self.q.ilog2()
+    }
+
+    /// Validate parameters against paper §8 requirements.
+    ///
+    /// - n ≥ 2
+    /// - q ≥ 5
+    /// - security_bits() ≥ 128 (NIST Level I minimum)
+    pub fn validate(&self) -> Result<(), ParamError> {
+        if self.n < 2 {
+            return Err(ParamError::NTooSmall(self.n));
+        }
+        if self.q < 5 {
+            return Err(ParamError::QTooSmall(self.q));
+        }
+        let bits = self.security_bits();
+        if bits < 128 {
+            return Err(ParamError::InsufficientSecurity { got: bits, need: 128 });
+        }
+        Ok(())
+    }
+
+    /// Returns `true` if these parameters meet NIST Level I (128-bit security).
+    pub fn is_nist_level1(&self) -> bool { self.security_bits() >= 128 }
+
+    /// Returns `true` if these parameters meet NIST Level III (192-bit security).
+    pub fn is_nist_level3(&self) -> bool { self.security_bits() >= 192 }
+
+    /// Returns `true` if these parameters meet NIST Level V (256-bit security).
+    pub fn is_nist_level5(&self) -> bool { self.security_bits() >= 256 }
+
+    /// Byte length of a commitment matrix (2n × 2 × 8 bytes).
+    pub fn commit_bytes(&self) -> usize { 2 * self.n * 2 * 8 }
+
+    /// Byte length of a proof: header(16) + a_rows(32n) + z_m(8n) + z_r(8n).
+    pub fn proof_bytes(&self) -> usize { 16 + 48 * self.n }
+}
+
+/// Recommended parameter sets (paper Table 1).
+impl EgocParams {
+    /// NIST Level I — 136-bit security: n=10, q=257.
+    pub const LEVEL1: Self = Self { n: 10, q: 257 };
+    /// NIST Level III — 204-bit security: n=16, q=257.
+    pub const LEVEL3: Self = Self { n: 16, q: 257 };
+    /// NIST Level V — 272-bit security: n=22, q=257.
+    pub const LEVEL5: Self = Self { n: 22, q: 257 };
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -240,5 +329,58 @@ mod tests {
             let v = random_nonzero(Q, &mut rng);
             assert!(v.val() > 0 && v.val() < Q);
         }
+    }
+
+    // EgocParams tests
+    #[test]
+    fn params_level1_valid() {
+        assert!(EgocParams::LEVEL1.validate().is_ok());
+        assert!(EgocParams::LEVEL1.is_nist_level1());
+        assert_eq!(EgocParams::LEVEL1.security_bits(), 136); // (2*10-3)*8
+    }
+
+    #[test]
+    fn params_level3_valid() {
+        assert!(EgocParams::LEVEL3.validate().is_ok());
+        assert!(EgocParams::LEVEL3.is_nist_level3());
+        assert_eq!(EgocParams::LEVEL3.security_bits(), 232); // (2*16-3)*8 = 29*8
+    }
+
+    #[test]
+    fn params_level5_valid() {
+        assert!(EgocParams::LEVEL5.validate().is_ok());
+        assert!(EgocParams::LEVEL5.is_nist_level5());
+        assert_eq!(EgocParams::LEVEL5.security_bits(), 328); // (2*22-3)*8 = 41*8
+    }
+
+    #[test]
+    fn params_n_too_small() {
+        let p = EgocParams { n: 1, q: 257 };
+        assert!(matches!(p.validate(), Err(ParamError::NTooSmall(1))));
+    }
+
+    #[test]
+    fn params_q_too_small() {
+        let p = EgocParams { n: 10, q: 3 };
+        assert!(matches!(p.validate(), Err(ParamError::QTooSmall(3))));
+    }
+
+    #[test]
+    fn params_insufficient_security() {
+        // n=3, q=101: (6-3)*6 = 18 bits — way below 128
+        let p = EgocParams { n: 3, q: 101 };
+        assert!(matches!(p.validate(), Err(ParamError::InsufficientSecurity { .. })));
+    }
+
+    #[test]
+    fn params_proof_bytes() {
+        // proof_bytes = 16 + 48*n
+        assert_eq!(EgocParams::LEVEL1.proof_bytes(), 16 + 48 * 10);
+    }
+
+    #[test]
+    fn params_new_rejects_bad() {
+        assert!(EgocParams::new(1, 257).is_err());
+        assert!(EgocParams::new(10, 257).is_ok());
     }
 }

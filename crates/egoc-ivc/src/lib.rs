@@ -1,14 +1,24 @@
-//! `egoc-ivc` — Nova-style additive IVC fold scheme for E-GOC.
+//! `egoc-ivc` — Additive IVC fold scheme for E-GOC.
 //!
 //! # Design (Committee: A1, A3 Bowe, A4 Szalai)
 //! - Single fold: (C1,m1,r1) + (C2,m2,r2) → (C_fold, m_fold, r_fold)
 //! - L-linearity: L(m1+m2, r1+r2)·g = C1+C2  (proved by construction)
 //! - Fresh NIZKP for folded witness — soundness error 1/q per fold
-//! - Recursive tree fold for N statements: O(n·log N) total
+//!
+//! # Complexity
+//! - Single fold: O(n) — n field element additions + one commit/prove
+//! - Tree fold (N witnesses): O(n·N) total — binary tree has N-1 fold
+//!   operations across all levels; each level halves the count but each
+//!   fold costs O(n). The tree *depth* is ⌈log₂N⌉ but total work is O(N).
 //!
 //! # Soundness (Theorem 6)
-//! Err_fold(N) ≤ ⌈log₂N⌉/q  (union bound over binary tree levels)
+//! Err_fold(N) ≤ ⌈log₂N⌉/q  (union bound over binary tree depth)
 //! Note: knowledge soundness yields aggregated witness only.
+//!
+//! # Relationship to Nova
+//! E-GOC fold uses additive witness combination exploiting the linearity
+//! of the lift map L(m,r). This differs from Nova's relaxed R1CS approach —
+//! E-GOC fold is native to SL(2,Fq) structure, not a general SNARK technique.
 
 use egoc_commit::{commit, verify, Commitment, Witness};
 use egoc_field::Fp;
@@ -36,9 +46,6 @@ pub fn ivc_fold(
     g:  &SL2,
     rng: &mut impl rand::RngCore,
 ) -> FoldResult {
-    let _q = w1.q;
-    let _n = w1.n;
-
     // Additive fold of witnesses
     let m_fold: Vec<Fp> = w1.m.iter().zip(w2.m.iter()).map(|(a, b)| a.add(*b)).collect();
     let r_fold: Vec<Fp> = w1.r.iter().zip(w2.r.iter()).map(|(a, b)| a.add(*b)).collect();
@@ -60,12 +67,13 @@ pub fn ivc_fold(
 // ---------------------------------------------------------------------------
 
 pub struct TreeFoldResult {
-    pub final_proof:   Proof,
-    pub final_commit:  Commitment,
-    pub depth:         usize,
-    pub all_valid:     bool,
-    /// Soundness error bound: depth / q
-    pub soundness_err: f64,
+    pub final_proof:  Proof,
+    pub final_commit: Commitment,
+    pub depth:        usize,
+    pub all_valid:    bool,
+    /// Soundness error bound as exact rational (numerator=depth, denominator=q).
+    /// Error ≤ depth/q.  Avoid f64 for security-critical bounds.
+    pub soundness_err: (usize, u64),
 }
 
 /// Fold N statements in a binary tree. All must share the same gauge g.
@@ -108,7 +116,7 @@ pub fn tree_fold(
         final_commit,
         depth,
         all_valid,
-        soundness_err: depth as f64 / q as f64,
+        soundness_err: (depth, q),
     }
 }
 
@@ -144,7 +152,11 @@ mod tests {
         let r = tree_fold(ws, &g, &mut rng);
         assert!(r.all_valid);
         assert_eq!(r.depth, 3);
-        assert!(r.soundness_err < 0.1);
+        // soundness_err = (depth=3, q=101) → 3/101 ≈ 0.030 < 0.1 ✓
+        let (num, den) = r.soundness_err;
+        assert_eq!(num, 3);
+        assert_eq!(den, Q);
+        assert!(num < (den / 10) as usize); // 3 < 10
     }
 
     #[test]

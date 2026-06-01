@@ -166,7 +166,7 @@ Examples:
 ```
 feat(egoc-field): ct_pow Fermat inversion replaces ext_gcd
 fix(egoc-proof): ct_eq accumulation in verify_proof (A5)
-perf(egoc-field): u128 Montgomery reduction
+perf(egoc-field): const-generic Fp<Q> removes per-element q field
 audit(egoc-commit): constant-time gauge hash comparison
 ```
 
