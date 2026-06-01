@@ -30,3 +30,8 @@ egoc-sl2    = { path = "crates/egoc-sl2" }
 egoc-commit = { path = "crates/egoc-commit" }
 egoc-proof  = { path = "crates/egoc-proof" }
 egoc-ivc    = { path = "crates/egoc-ivc" }
+
+[profile.bench]
+opt-level      = 3
+lto            = "thin"
+codegen-units  = 1

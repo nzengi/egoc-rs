@@ -3,9 +3,12 @@
 //! # Design (Committee: A1 de Valence, A4 Szalai, A5 DJB)
 //! - Runtime-parametric prime `q` stored as `u64`
 //! - All arithmetic via `u128` to avoid overflow
-//! - `modinv` via constant-time binary GCD (Bernstein-Yang 2019)
+//! - `modinv` via Fermat's little theorem: a^(q-2) mod q
+//!   Exponent q-2 is derived from the *public* prime, so loop count is
+//!   fixed at 64 bits independent of secret `a` → constant-time in `a`.
 //! - `subtle::ConstantTimeEq` for all secret comparisons
 //! - `zeroize::Zeroize` on all secret types
+//! - Unbiased random sampling via 128-bit reduction (bias ≈ 2^{-64})
 
 use subtle::{Choice, ConditionallySelectable, ConstantTimeEq, CtOption};
 use zeroize::Zeroize;
@@ -83,13 +86,15 @@ impl Fp {
         }
     }
 
-    /// Modular inverse using the extended Euclidean algorithm.
+    /// Modular inverse via Fermat's little theorem: a^(q-2) mod q.
+    ///
+    /// Since q is the *public* prime, the exponent (q-2) is fixed and public.
+    /// The square-and-multiply loop always runs exactly 64 iterations with
+    /// constant-time conditional multiplies → no timing leak from secret `a`.
     /// Returns `CtOption::none()` if `self == 0`.
     pub fn invert(self) -> CtOption<Self> {
-        // Extended Euclidean — not fully constant-time for secret moduli,
-        // but q is public, only the value is secret.
         let is_zero: Choice = self.ct_eq(&Self::zero(self.q));
-        let inv = ext_gcd_inv(self.val, self.q);
+        let inv = ct_pow(self.val, self.q - 2, self.q);
         CtOption::new(Self { val: inv, q: self.q }, !is_zero)
     }
 
@@ -129,39 +134,56 @@ impl ConditionallySelectable for Fp {
 }
 
 // ---------------------------------------------------------------------------
-// Extended GCD → modular inverse
+// Constant-time modular exponentiation (Fermat inverse)
 // ---------------------------------------------------------------------------
 
-/// Compute x such that a*x ≡ 1 (mod m).  Returns 0 if no inverse exists.
-/// `a` may be secret; `m` is public (prime q).
-fn ext_gcd_inv(a: u64, m: u64) -> u64 {
-    if a == 0 { return 0; }
-    let (mut old_r, mut r) = (a as i128, m as i128);
-    let (mut old_s, mut s) = (1i128, 0i128);
-    while r != 0 {
-        let q   = old_r / r;
-        let tmp = r;     r     = old_r - q * r;     old_r = tmp;
-        let tmp = s;     s     = old_s - q * s;     old_s = tmp;
+/// Constant-time square-and-multiply: base^exp mod m.
+///
+/// The loop runs a fixed 64 iterations regardless of `base` or `exp`.
+/// Bit selection and conditional multiply use only data-independent branches,
+/// so no secret value leaks through timing.  `exp` is always the public
+/// constant (q-2), so even the per-bit branch is safe.
+#[inline]
+fn ct_pow(base: u64, exp: u64, m: u64) -> u64 {
+    let mut result: u128 = 1;
+    let mut b: u128 = base as u128 % m as u128;
+    let mut e = exp;
+    // Fixed 64 iterations — e is a public constant (q-2).
+    for _ in 0..64 {
+        // If low bit is set, multiply result by b.
+        let mask = (e & 1).wrapping_neg(); // 0xFFFF… if bit set, else 0
+        let candidate = (result * b) % m as u128;
+        // Constant-time select: result = mask ? candidate : result
+        result = (candidate & mask as u128) | (result & !mask as u128);
+        b = (b * b) % m as u128;
+        e >>= 1;
     }
-    if old_r != 1 { return 0; }
-    ((old_s % m as i128 + m as i128) % m as i128) as u64
+    result as u64
 }
 
 // ---------------------------------------------------------------------------
 // Random field element
 // ---------------------------------------------------------------------------
 
-/// Sample a uniform non-zero element from Fq.
-pub fn random_nonzero(q: u64, rng: &mut impl rand::RngCore) -> Fp {
-    loop {
-        let v = (rng.next_u64() % q) as u64;
-        if v != 0 { return Fp::new(v, q); }
-    }
+/// Sample a uniform element from Fq (including zero).
+///
+/// Uses 128-bit reduction: bias ≤ 2^64 / q^2 < 2^{-64} for q ≤ 2^32.
+/// This is negligible for all practical field sizes.
+pub fn random_fp(q: u64, rng: &mut impl rand::RngCore) -> Fp {
+    let hi = rng.next_u64() as u128;
+    let lo = rng.next_u64() as u128;
+    let wide = (hi << 64) | lo;
+    Fp::new((wide % q as u128) as u64, q)
 }
 
-/// Sample a uniform element from Fq (including zero).
-pub fn random_fp(q: u64, rng: &mut impl rand::RngCore) -> Fp {
-    Fp::new(rng.next_u64() % q, q)
+/// Sample a uniform non-zero element from Fq.
+///
+/// Rejection sampling over `random_fp`; expected iterations: q/(q-1) ≈ 1.
+pub fn random_nonzero(q: u64, rng: &mut impl rand::RngCore) -> Fp {
+    loop {
+        let v = random_fp(q, rng);
+        if !bool::from(v.is_zero()) { return v; }
+    }
 }
 
 // ---------------------------------------------------------------------------

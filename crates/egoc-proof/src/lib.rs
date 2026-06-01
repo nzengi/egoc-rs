@@ -10,7 +10,8 @@
 use egoc_commit::{lift, CommitMatrix, Witness};
 use egoc_field::Fp;
 use egoc_sl2::SL2;
-use zeroize::Zeroize;
+use subtle::{Choice, ConstantTimeEq};
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 // ---------------------------------------------------------------------------
 // Types
@@ -18,11 +19,14 @@ use zeroize::Zeroize;
 
 /// Non-interactive ZKP: π = (A, z_m, z_r).
 /// `e` is not stored — verifier recomputes from (C, g, A).
-#[derive(Clone, Debug)]
+///
+/// `z_m` and `z_r` are public (part of the proof transcript) but we
+/// zeroize on drop as a precaution for short-lived proofs held in memory.
+#[derive(Clone, Debug, Zeroize, ZeroizeOnDrop)]
 pub struct Proof {
     /// Commitment to prover randomness: A = L(k,s)·g
     pub a_rows:  Vec<[Fp; 2]>,
-    /// Response vectors
+    /// Response vectors (public, but zeroized on drop)
     pub z_m: Vec<Fp>,
     pub z_r: Vec<Fp>,
 }
@@ -38,14 +42,21 @@ impl Proof {
 // Fiat-Shamir challenge
 // ---------------------------------------------------------------------------
 
-/// e = BLAKE3(C_bytes ‖ g_bytes ‖ A_bytes) mod (q-1) + 1 ∈ {1,..,q-1}.
+/// Domain separation key for Fiat-Shamir BLAKE3 (A2 O'Connor recommendation).
+/// Exactly 32 bytes — prevents cross-protocol hash collisions.
+static FS_DOMAIN_KEY: &[u8; 32] = b"egoc-fiat-shamir-challenge-v1   ";
+
+/// e = BLAKE3_keyed(domain ‖ C_bytes ‖ g_bytes ‖ A_bytes) mod (q-1) + 1 ∈ {1,..,q-1}.
+///
+/// Uses `blake3::Hasher::new_keyed` for domain separation — prevents cross-protocol
+/// hash collisions and enables future protocol versioning without output overlap.
 pub fn fiat_shamir_challenge(
     c_mat:  &CommitMatrix,
     g:      &SL2,
     a_rows: &[[Fp; 2]],
     q:      u64,
 ) -> Fp {
-    let mut hasher = blake3::Hasher::new();
+    let mut hasher = blake3::Hasher::new_keyed(FS_DOMAIN_KEY);
     hasher.update(&c_mat.to_bytes());
     hasher.update(&g.to_bytes());
     for row in a_rows {
@@ -53,8 +64,9 @@ pub fn fiat_shamir_challenge(
         hasher.update(&row[1].val().to_le_bytes());
     }
     let digest = hasher.finalize();
-    let raw = u64::from_le_bytes(digest.as_bytes()[..8].try_into().unwrap());
-    Fp::new(raw % (q - 1) + 1, q)  // e ∈ {1,..,q-1}
+    // Use 16 bytes (128 bits) → bias ≤ 2^128 / (q-1)^2 ≈ 2^{-64} for q≤2^32.
+    let raw = u128::from_le_bytes(digest.as_bytes()[..16].try_into().unwrap());
+    Fp::new((raw % (q - 1) as u128) as u64 + 1, q)  // e ∈ {1,..,q-1}
 }
 
 // ---------------------------------------------------------------------------
@@ -133,13 +145,15 @@ pub fn verify_proof(c_mat: &CommitMatrix, g: &SL2, proof: &Proof) -> bool {
     let lhs       = mat_mul_2x2(&lhs_lift, g);
 
     // RHS: A + e·C_mat
-    let ec = mat_scale(&c_mat.rows, e);
+    let ec = mat_scale(c_mat.rows(), e);
     let rhs = mat_add(&proof.a_rows, &ec);
 
-    // Compare
-    lhs.iter().zip(rhs.iter()).all(|(l, r)| {
-        l[0] == r[0] && l[1] == r[1]
-    })
+    // Constant-time comparison — no short-circuit branches on secret data.
+    let mut ok = Choice::from(1u8);
+    for (l, r) in lhs.iter().zip(rhs.iter()) {
+        ok &= l[0].ct_eq(&r[0]) & l[1].ct_eq(&r[1]);
+    }
+    bool::from(ok)
 }
 
 // ---------------------------------------------------------------------------

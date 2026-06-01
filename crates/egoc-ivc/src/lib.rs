@@ -150,14 +150,14 @@ mod tests {
     #[test]
     fn linearity_holds() {
         // L(m1+m2, r1+r2)·g = C1+C2
-        use egoc_commit::{lift, commit};
+        use egoc_commit::commit;
         let mut rng = StdRng::seed_from_u64(99);
         let w1 = Witness::random(N, Q, &mut rng);
         let w2 = Witness::random(N, Q, &mut rng);
         let g  = random_sl2(Q, &mut rng);
 
-        let c1 = commit(&w1, &g).matrix.rows;
-        let c2 = commit(&w2, &g).matrix.rows;
+        let c1 = commit(&w1, &g).matrix.rows().to_vec();
+        let c2 = commit(&w2, &g).matrix.rows().to_vec();
         let c_sum: Vec<[Fp; 2]> = c1.iter().zip(c2.iter())
             .map(|(a, b)| [a[0].add(b[0]), a[1].add(b[1])])
             .collect();
@@ -165,7 +165,7 @@ mod tests {
         let m_fold: Vec<Fp> = w1.m.iter().zip(w2.m.iter()).map(|(a,b)| a.add(*b)).collect();
         let r_fold: Vec<Fp> = w1.r.iter().zip(w2.r.iter()).map(|(a,b)| a.add(*b)).collect();
         let w_fold = Witness::new(m_fold, r_fold);
-        let c_fold = commit(&w_fold, &g).matrix.rows;
+        let c_fold = commit(&w_fold, &g).matrix.rows().to_vec();
 
         assert_eq!(c_fold, c_sum, "L-linearity must hold");
     }

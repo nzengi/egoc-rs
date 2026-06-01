@@ -13,7 +13,7 @@
 
 use egoc_field::Fp;
 use egoc_sl2::SL2;
-use subtle::ConstantTimeEq;
+use subtle::{Choice, ConstantTimeEq};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 // ---------------------------------------------------------------------------
@@ -54,12 +54,16 @@ impl std::fmt::Debug for Witness {
 /// Stored as a flat Vec of length 2n*2 in row-major order.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CommitMatrix {
-    pub rows: Vec<[Fp; 2]>,  // length 2n
-    pub q:    u64,
+    rows: Vec<[Fp; 2]>,  // private — access via rows() / rows_mut()
+    pub q: u64,
 }
 
 impl CommitMatrix {
+    /// Number of message/randomness pairs (n = row_count / 2).
     pub fn n(&self) -> usize { self.rows.len() / 2 }
+
+    /// Read-only view of the matrix rows.
+    pub fn rows(&self) -> &[[Fp; 2]] { &self.rows }
 
     /// Byte serialisation for hashing / benchmarks.
     pub fn to_bytes(&self) -> Vec<u8> {
@@ -122,19 +126,25 @@ pub fn commit(w: &Witness, g: &SL2) -> Commitment {
     }
 }
 
-/// Verify: recompute commit and compare (constant-time on matrix, fast on hash).
+/// Verify: recompute commit and compare, fully constant-time.
+///
+/// All comparisons use `subtle::Choice` accumulation — no short-circuit
+/// branches on secret data.  Length mismatch is an early public-data exit
+/// (lengths are not secret).
 pub fn verify(w: &Witness, g: &SL2, cmt: &Commitment) -> bool {
     let expected = commit(w, g);
-    // Matrix comparison (constant-time element-wise)
     if expected.matrix.rows.len() != cmt.matrix.rows.len() { return false; }
-    let matrix_ok: bool = expected.matrix.rows.iter()
-        .zip(cmt.matrix.rows.iter())
-        .all(|(a, b)| {
-            bool::from(a[0].ct_eq(&b[0]) & a[1].ct_eq(&b[1]))
-        });
-    // Hash comparison
-    let hash_ok = expected.gauge_hash == cmt.gauge_hash;
-    matrix_ok && hash_ok
+
+    // Accumulate matrix comparison with bitwise AND of Choice values.
+    let mut ok = Choice::from(1u8);
+    for (a, b) in expected.matrix.rows.iter().zip(cmt.matrix.rows.iter()) {
+        ok &= a[0].ct_eq(&b[0]) & a[1].ct_eq(&b[1]);
+    }
+
+    // Constant-time 32-byte hash comparison via subtle.
+    ok &= expected.gauge_hash.ct_eq(&cmt.gauge_hash);
+
+    bool::from(ok)
 }
 
 // ---------------------------------------------------------------------------
@@ -177,7 +187,7 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(99);
         let w = Witness::random(N, Q, &mut rng);
         let g = random_sl2(Q, &mut rng);
-        let cmt = commit(&w, &g);
+        let _cmt = commit(&w, &g);
 
         // Construct attack witness w' = (-m, -r) and gauge -g
         let neg_m: Vec<Fp> = w.m.iter().map(|x| x.neg()).collect();

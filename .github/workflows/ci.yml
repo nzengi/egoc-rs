@@ -1,0 +1,137 @@
+name: CI
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+    branches: [main, dev]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # ------------------------------------------------------------------ #
+  # 1. Test — all crates, stable + beta                                 #
+  # ------------------------------------------------------------------ #
+  test:
+    name: Test (${{ matrix.rust }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        rust: [stable, beta]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust ${{ matrix.rust }}
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.rust }}
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ matrix.rust }}-${{ hashFiles('**/Cargo.toml') }}
+
+      - name: cargo test --workspace
+        run: cargo test --workspace --all-features
+
+  # ------------------------------------------------------------------ #
+  # 2. Clippy — zero tolerance with -D warnings                         #
+  # ------------------------------------------------------------------ #
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-features -- -D warnings
+
+  # ------------------------------------------------------------------ #
+  # 3. Format                                                           #
+  # ------------------------------------------------------------------ #
+  fmt:
+    name: Format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+
+  # ------------------------------------------------------------------ #
+  # 4. Miri — unsafe-free + undefined behaviour check                  #
+  #    Priority: egoc-field and egoc-sl2 (core arithmetic)             #
+  # ------------------------------------------------------------------ #
+  miri:
+    name: Miri
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: miri
+      - name: cargo miri test (egoc-field)
+        run: cargo miri test -p egoc-field
+        env:
+          MIRIFLAGS: "-Zmiri-strict-provenance"
+      - name: cargo miri test (egoc-sl2)
+        run: cargo miri test -p egoc-sl2
+        env:
+          MIRIFLAGS: "-Zmiri-strict-provenance"
+
+  # ------------------------------------------------------------------ #
+  # 5. Coverage — 80%+ target with llvm-cov                            #
+  # ------------------------------------------------------------------ #
+  coverage:
+    name: Coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - name: Install cargo-llvm-cov
+        run: cargo install cargo-llvm-cov --locked
+      - name: Generate coverage
+        run: cargo llvm-cov --workspace --lcov --output-path lcov.info
+      - name: Upload to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          files: lcov.info
+          fail_ci_if_error: false
+
+  # ------------------------------------------------------------------ #
+  # 6. Benchmark smoke test — compile-only, regression guard           #
+  #    Not a full benchmark run; verifies the bench binary builds.     #
+  # ------------------------------------------------------------------ #
+  bench-smoke:
+    name: Bench Smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: cargo bench --no-run
+        run: cargo bench -p egoc-bench --no-run
+
+  # ------------------------------------------------------------------ #
+  # 7. Audit — dependency CVE scan with cargo-audit                    #
+  # ------------------------------------------------------------------ #
+  audit:
+    name: Dependency Audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+      - name: cargo audit
+        run: cargo audit

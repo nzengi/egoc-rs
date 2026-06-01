@@ -51,14 +51,18 @@ impl SL2 {
 
     /// Group multiplication: self * rhs.
     pub fn mul(&self, rhs: &Self) -> Self {
-        let q = self.q();
-        Self {
+        let result = Self {
             a: self.a.mul(rhs.a).add(self.b.mul(rhs.c)),
             b: self.a.mul(rhs.b).add(self.b.mul(rhs.d)),
             c: self.c.mul(rhs.a).add(self.d.mul(rhs.c)),
             d: self.c.mul(rhs.b).add(self.d.mul(rhs.d)),
-        }
-        // Note: det(AB) = det(A)*det(B) = 1*1 = 1 preserved automatically
+        };
+        // det(AB) = det(A)·det(B) = 1·1 = 1 — verify in debug builds.
+        debug_assert_eq!(
+            result.det(), Fp::one(self.q()),
+            "SL2::mul produced det ≠ 1 — group invariant violated"
+        );
+        result
     }
 
     /// Group inverse: [[d,-b],[-c,a]] (since det=1).
