@@ -196,6 +196,13 @@ pub fn prove<const Q: u64>(
     c_mat: &CommitMatrix<Q>,
     rng:   &mut impl rand::RngCore,
 ) -> Proof<Q> {
+    // Caller contract: c_mat must have been built from a witness of the same n.
+    // The session API enforces this, so debug_assert is the right level here.
+    debug_assert_eq!(
+        c_mat.n(), w.n,
+        "prove(): c_mat.n()={} != w.n={} — commitment was built for a different witness",
+        c_mat.n(), w.n
+    );
     let n = w.n;
 
     // Prover randomness k, s ← Fq^n  (zeroized after use)
@@ -233,6 +240,14 @@ pub fn verify_proof<const Q: u64>(
     g:     &SL2<Q>,
     proof: &Proof<Q>,
 ) -> Result<(), EgocError> {
+    // Guard against malformed proofs where z_r was truncated or extended
+    // relative to z_m. Without this check the .zip() below would silently
+    // verify fewer equations than intended, potentially accepting a bad proof.
+    if proof.z_r.len() != proof.z_m.len() {
+        return Err(EgocError::Proof(format!(
+            "z_m.len()={} != z_r.len()={}", proof.z_m.len(), proof.z_r.len()
+        )));
+    }
     let n = proof.z_m.len();
     if proof.a.rows().len() != 2 * n {
         return Err(EgocError::Proof(format!(
@@ -425,6 +440,29 @@ mod tests {
         assert_eq!(sim.a.rows().len(), 2 * N);
         assert_eq!(sim.z_m.len(), N);
         assert_eq!(sim.z_r.len(), N);
+    }
+
+    #[test]
+    fn verify_proof_mismatched_z_fails() {
+        let mut rng = StdRng::seed_from_u64(70);
+        let w: W   = Witness::random(N, &mut rng);
+        let g: G   = random_sl2(&mut rng);
+        let cmt    = commit(&w, &g);
+        let pf: P  = prove(&w, &g, &cmt.matrix, &mut rng);
+
+        // Construct a malformed proof with z_r one element shorter than z_m.
+        // Before the guard, .zip() would silently check N-1 equations instead of N.
+        let mut z_r_short = pf.z_r.clone();
+        z_r_short.pop();
+        let pf_bad = Proof::<101> {
+            a:   pf.a.clone(),
+            z_m: pf.z_m.clone(),
+            z_r: z_r_short,
+        };
+        assert!(
+            verify_proof(&cmt.matrix, &g, &pf_bad).is_err(),
+            "truncated z_r must be rejected by verify_proof"
+        );
     }
 
     #[test]

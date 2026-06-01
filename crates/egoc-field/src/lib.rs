@@ -168,6 +168,9 @@ pub fn ct_pow(base: u64, exp: u64, m: u64) -> u64 {
     for _ in 0..64 {
         let mask = (e & 1).wrapping_neg();
         let candidate = (result * b) % m as u128;
+        // CT-select: mask is a u64 zero-extended to u128. `result < m < 2^64`
+        // always holds (upper 64 bits are zero), so `!mask as u128` correctly
+        // clears the upper half. A future change widening m must revisit this.
         result = (candidate & mask as u128) | (result & !mask as u128);
         b = (b * b) % m as u128;
         e >>= 1;
@@ -207,6 +210,26 @@ pub fn zero_vec<const Q: u64>(n: usize) -> Vec<Fp<Q>> {
 }
 
 // ---------------------------------------------------------------------------
+// Primality helper
+// ---------------------------------------------------------------------------
+
+/// Trial-division primality test for small primes (q ≤ 2^16 by design).
+///
+/// Returns `true` if and only if `n` is prime.
+/// No Miller-Rabin needed — E-GOC parameters use q ≤ 65537.
+fn is_prime(n: u64) -> bool {
+    if n < 2 { return false; }
+    if n == 2 { return true; }
+    if n % 2 == 0 { return false; }
+    let mut i = 3u64;
+    while i * i <= n {
+        if n % i == 0 { return false; }
+        i += 2;
+    }
+    true
+}
+
+// ---------------------------------------------------------------------------
 // EgocParams — security parameter set
 // ---------------------------------------------------------------------------
 
@@ -232,6 +255,9 @@ pub enum ParamError {
     /// q is too small.
     #[error("q must be ≥ 5, got {0}")]
     QTooSmall(u64),
+    /// q is not prime — Fermat inversion is only correct for prime moduli.
+    #[error("q must be prime, got {0} (composite)")]
+    QNotPrime(u64),
     /// Security level is below the required threshold.
     #[error("security level {got} bits < required {need} bits")]
     InsufficientSecurity { got: u32, need: u32 },
@@ -251,10 +277,11 @@ impl EgocParams {
         factor * self.q.ilog2()
     }
 
-    /// Validate against paper §8 requirements (n ≥ 2, q ≥ 5, ≥ 128 bits).
+    /// Validate against paper §8 requirements (n ≥ 2, q ≥ 5, q prime, ≥ 128 bits).
     pub fn validate(&self) -> Result<(), ParamError> {
         if self.n < 2 { return Err(ParamError::NTooSmall(self.n)); }
         if self.q < 5 { return Err(ParamError::QTooSmall(self.q)); }
+        if !is_prime(self.q) { return Err(ParamError::QNotPrime(self.q)); }
         let bits = self.security_bits();
         if bits < 128 {
             return Err(ParamError::InsufficientSecurity { got: bits, need: 128 });
@@ -388,5 +415,52 @@ mod tests {
     fn params_new_rejects_bad() {
         assert!(EgocParams::new(1, 257).is_err());
         assert!(EgocParams::new(10, 257).is_ok());
+    }
+
+    #[test]
+    fn params_composite_q_fails() {
+        for &q in &[6u64, 9, 10, 15, 25, 49] {
+            let p = EgocParams { n: 10, q };
+            assert!(
+                matches!(p.validate(), Err(ParamError::QNotPrime(_))),
+                "composite q={} should fail primality check", q
+            );
+        }
+    }
+
+    #[test]
+    fn params_prime_q_ok() {
+        // Primes in [256, 512) give floor(log2(q))=8, so 17×8=136 ≥ 128 bits.
+        // 257, 263, 269 are all prime and satisfy the full security requirement.
+        for &q in &[257u64, 263, 269] {
+            let p = EgocParams { n: 10, q };
+            assert!(
+                p.validate().is_ok(),
+                "prime q={} with n=10 should pass full validation", q
+            );
+        }
+        // Primes that are prime but fail the security threshold — must NOT
+        // be rejected with QNotPrime; the error must be InsufficientSecurity.
+        for &q in &[7u64, 11, 13, 127] {
+            let p = EgocParams { n: 10, q };
+            assert!(
+                !matches!(p.validate(), Err(ParamError::QNotPrime(_))),
+                "prime q={} should not fail primality check", q
+            );
+        }
+    }
+
+    #[test]
+    fn is_prime_basic() {
+        assert!(!is_prime(0));
+        assert!(!is_prime(1));
+        assert!(is_prime(2));
+        assert!(is_prime(3));
+        assert!(!is_prime(4));
+        assert!(is_prime(5));
+        assert!(!is_prime(6));
+        assert!(is_prime(257));
+        assert!(!is_prime(256));
+        assert!(!is_prime(255));
     }
 }
