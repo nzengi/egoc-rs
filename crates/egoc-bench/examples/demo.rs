@@ -1,42 +1,42 @@
 // E-GOC Demo Binary
 // Run: cargo run --example demo -p egoc-bench
+//
+// Uses the unified EgocSession<Q> API introduced in the const-generic refactor.
+// All field operations use Q=257 (NIST Level I prime) as a compile-time constant.
 
-use egoc_commit::{commit, verify, Witness};
-use egoc_field::{EgocParams, Fp};
-use egoc_ivc::{ivc_fold, tree_fold};
-use egoc_proof::{prove, verify_proof};
-use egoc_sl2::random_sl2;
+use egoc::{EgocParams, EgocSession, Fp, Proof};
 use rand::SeedableRng;
 use rand::rngs::StdRng;
 
-fn line() {
-    println!("{}", "─".repeat(62));
-}
+const Q: u64 = 257;
+type F = Fp<Q>;
+type S = EgocSession<Q>;
+
+fn line()  { println!("{}", "─".repeat(62)); }
+fn dline() { println!("{}", "═".repeat(62)); }
 fn header(n: u8, title: &str) {
     println!();
-    println!("{}", "═".repeat(62));
+    dline();
     println!("  §{}. {}", n, title);
-    println!("{}", "═".repeat(62));
+    dline();
 }
 
 fn main() {
-    println!("{}", "═".repeat(62));
+    dline();
     println!("  E-GOC — Group-Orbit Commitment Scheme");
     println!("  SL(2,Fq) native · SSP hardness · No trusted setup");
-    println!("{}", "═".repeat(62));
+    dline();
 
     // ----------------------------------------------------------------
     // §1 — Security Parameters
     // ----------------------------------------------------------------
     header(1, "Security Parameters");
 
-    let levels = [
+    for (name, p) in &[
         ("NIST Level I  ", EgocParams::LEVEL1),
         ("NIST Level III", EgocParams::LEVEL3),
         ("NIST Level V  ", EgocParams::LEVEL5),
-    ];
-
-    for (name, p) in &levels {
+    ] {
         println!("  {}:", name);
         println!("    n (message length)   = {}", p.n);
         println!("    q (field prime)       = {}", p.q);
@@ -50,42 +50,43 @@ fn main() {
     }
 
     // ----------------------------------------------------------------
-    // §2 — Commit / Verify
+    // §2 — EgocSession + Commit / Verify
     // ----------------------------------------------------------------
-    header(2, "Commit / Verify");
+    header(2, "EgocSession · Commit / Verify");
 
-    let params = EgocParams::LEVEL1;
     let mut rng = StdRng::seed_from_u64(42);
-    let g   = random_sl2(params.q, &mut rng);
-    let w   = Witness::random_from_params(&params, &mut rng);
-    let cmt = commit(&w, &g);
+    let session: S = EgocSession::random(EgocParams::LEVEL1, &mut rng);
 
-    println!("  Parameters: n={}, q={}", params.n, params.q);
-    println!();
+    println!("  Session: n={}, q={}", session.params.n, Q);
     println!("  Gauge g (SL2 matrix [[a,b],[c,d]]):");
+    let g = &session.gauge;
     println!("    a={:3}  b={:3}  c={:3}  d={:3}  det=1",
         g.a.val(), g.b.val(), g.c.val(), g.d.val());
     println!();
+
+    let w   = session.random_witness(&mut rng);
+    let cmt = session.commit(&w);
+
     println!("  Commitment matrix C = L(m,r)·g  ({} rows × 2 cols):", cmt.matrix.rows().len());
     for (i, row) in cmt.matrix.rows().iter().enumerate() {
         println!("    C[{:2}] = [ {:3}, {:3} ]", i, row[0].val(), row[1].val());
     }
     println!();
     println!("  Gauge hash H(g) = BLAKE3(g.to_bytes()):");
-    let gh = cmt.gauge_hash;
-    println!("    {}", gh.iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(""));
+    println!("    {}", cmt.gauge_hash.iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(""));
     println!();
-    println!("  Commitment total size: {} bytes  ({:.2} KB)", params.commit_bytes(), params.commit_bytes() as f64 / 1024.0);
+    println!("  Commitment size: {} bytes  ({:.2} KB)",
+        session.commit_bytes(), session.commit_bytes() as f64 / 1024.0);
     line();
 
-    match verify(&w, &g, &cmt) {
-        Ok(())  => println!("  verify(correct witness)  → Ok  ✓"),
+    match session.verify(&w, &cmt) {
+        Ok(())  => println!("  verify(correct witness) → Ok  ✓"),
         Err(e)  => println!("  verify FAILED: {}", e),
     }
-    let w_bad = Witness::random_from_params(&params, &mut rng);
-    match verify(&w_bad, &g, &cmt) {
-        Ok(())  => println!("  verify(wrong witness)    → accepted  ✗  BUG"),
-        Err(_)  => println!("  verify(wrong witness)    → rejected  ✓"),
+    let w_bad = session.random_witness(&mut rng);
+    match session.verify(&w_bad, &cmt) {
+        Ok(())  => println!("  verify(wrong witness)   → accepted  ✗  BUG"),
+        Err(_)  => println!("  verify(wrong witness)   → rejected  ✓"),
     }
 
     // ----------------------------------------------------------------
@@ -93,89 +94,106 @@ fn main() {
     // ----------------------------------------------------------------
     header(3, "NIZKP Prove / Verify  (Sigma + Fiat-Shamir + BLAKE3)");
 
-    let pf = prove(&w, &g, &cmt.matrix, &mut rng);
+    let pf = session.prove(&w, &cmt, &mut rng);
 
     println!("  Proof π = (A, z_m, z_r):");
     println!();
-    println!("  A = commitment to prover randomness  ({} rows × 2 cols):", pf.a_rows.len());
-    for (i, row) in pf.a_rows.iter().enumerate() {
+    println!("  A = commitment to prover randomness  ({} rows × 2 cols):", pf.a.rows().len());
+    for (i, row) in pf.a.rows().iter().enumerate() {
         println!("    A[{:2}] = [ {:3}, {:3} ]", i, row[0].val(), row[1].val());
     }
     println!();
     println!("  z_m (response for message, {} elements):", pf.z_m.len());
-    println!("    [{}]", pf.z_m.iter().map(|f| format!("{:3}", f.val())).collect::<Vec<_>>().join(", "));
+    println!("    [{}]", pf.z_m.iter().map(|f: &F| format!("{:3}", f.val())).collect::<Vec<_>>().join(", "));
     println!();
     println!("  z_r (response for randomness, {} elements):", pf.z_r.len());
-    println!("    [{}]", pf.z_r.iter().map(|f| format!("{:3}", f.val())).collect::<Vec<_>>().join(", "));
+    println!("    [{}]", pf.z_r.iter().map(|f: &F| format!("{:3}", f.val())).collect::<Vec<_>>().join(", "));
     println!();
     println!("  Proof byte layout:");
     println!("    header (n,q)  :  16 bytes");
-    println!("    A rows        :  {} bytes  (2n × 2 × 8)", 32 * params.n);
-    println!("    z_m           :  {} bytes  (n × 8)", 8 * params.n);
-    println!("    z_r           :  {} bytes  (n × 8)", 8 * params.n);
-    println!("    total         :  {} bytes  ({:.2} KB)", pf.byte_len(), pf.byte_len() as f64 / 1024.0);
+    println!("    A rows        :  {} bytes  (2n × 2 × 8)", 32 * session.params.n);
+    println!("    z_m           :  {} bytes  (n × 8)", 8 * session.params.n);
+    println!("    z_r           :  {} bytes  (n × 8)", 8 * session.params.n);
+    println!("    total         :  {} bytes  ({:.2} KB)",
+        pf.byte_len(), pf.byte_len() as f64 / 1024.0);
     line();
 
-    match verify_proof(&cmt.matrix, &g, &pf) {
-        Ok(())  => println!("  verify_proof(correct proof)  → Ok  ✓"),
+    match session.verify_proof(&cmt.matrix, &pf) {
+        Ok(())  => println!("  verify_proof(correct proof) → Ok  ✓"),
         Err(e)  => println!("  verify_proof FAILED: {}", e),
     }
-    let pf_bad = prove(&w_bad, &g, &cmt.matrix, &mut rng);
-    match verify_proof(&cmt.matrix, &g, &pf_bad) {
-        Ok(())  => println!("  verify_proof(wrong proof)    → accepted  ✗  BUG"),
-        Err(_)  => println!("  verify_proof(wrong proof)    → rejected  ✓"),
+    let pf_bad = session.prove(&w_bad, &session.commit(&w_bad), &mut rng);
+    match session.verify_proof(&cmt.matrix, &pf_bad) {
+        Ok(())  => println!("  verify_proof(wrong proof)   → accepted  ✗  BUG"),
+        Err(_)  => println!("  verify_proof(wrong proof)   → rejected  ✓"),
     }
-
-    // Serialization round-trip
-    let bytes = pf.to_bytes();
-    let pf2   = egoc_proof::Proof::from_bytes(&bytes).expect("deserialize");
-    match verify_proof(&cmt.matrix, &g, &pf2) {
+    let pf2 = Proof::<Q>::from_bytes(&pf.to_bytes()).expect("deserialize");
+    match session.verify_proof(&cmt.matrix, &pf2) {
         Ok(())  => println!("  serialize → deserialize → verify  → Ok  ✓"),
         Err(e)  => println!("  serialize round-trip FAILED: {}", e),
     }
 
     // ----------------------------------------------------------------
-    // §4 — IVC Single Fold
+    // §4 — commit_and_prove (single call)
     // ----------------------------------------------------------------
-    header(4, "IVC Single Fold  (additive linearity over Fq)");
+    header(4, "commit_and_prove  (session convenience API)");
 
-    let mut rng2 = StdRng::seed_from_u64(7);
-    let g2 = random_sl2(params.q, &mut rng2);
-    let w1 = Witness::random_from_params(&params, &mut rng2);
-    let w2 = Witness::random_from_params(&params, &mut rng2);
+    let mut rng2  = StdRng::seed_from_u64(55);
+    let session2: S = EgocSession::random(EgocParams::LEVEL1, &mut rng2);
+    let w2          = session2.random_witness(&mut rng2);
+    let (cmt2, pf2) = session2.commit_and_prove(&w2, &mut rng2);
 
-    println!("  w1.m = [{}]", w1.m.iter().map(|f| format!("{:3}", f.val())).collect::<Vec<_>>().join(", "));
-    println!("  w2.m = [{}]", w2.m.iter().map(|f| format!("{:3}", f.val())).collect::<Vec<_>>().join(", "));
+    println!("  One call: session.commit_and_prove(&w, &mut rng)");
+    println!();
+    match session2.verify(&w2, &cmt2) {
+        Ok(())  => println!("  verify(commitment)  → Ok  ✓"),
+        Err(e)  => println!("  verify FAILED: {}", e),
+    }
+    match session2.verify_proof(&cmt2.matrix, &pf2) {
+        Ok(())  => println!("  verify_proof(proof) → Ok  ✓"),
+        Err(e)  => println!("  verify_proof FAILED: {}", e),
+    }
+
+    // ----------------------------------------------------------------
+    // §5 — IVC Single Fold
+    // ----------------------------------------------------------------
+    header(5, "IVC Single Fold  (additive linearity over Fq)");
+
+    let mut rng3    = StdRng::seed_from_u64(7);
+    let session3: S = EgocSession::random(EgocParams::LEVEL1, &mut rng3);
+    let w3a         = session3.random_witness(&mut rng3);
+    let w3b         = session3.random_witness(&mut rng3);
+
+    println!("  w1.m = [{}]", w3a.m.iter().map(|f: &F| format!("{:3}", f.val())).collect::<Vec<_>>().join(", "));
+    println!("  w2.m = [{}]", w3b.m.iter().map(|f: &F| format!("{:3}", f.val())).collect::<Vec<_>>().join(", "));
     println!();
 
-    match ivc_fold(&w1, &w2, &g2, &mut rng2) {
+    match session3.fold(&w3a, &w3b, &mut rng3) {
         Ok(fold) => {
             println!("  m_fold = m1+m2 mod q:");
-            println!("    [{}]", fold.witness_fold.m.iter().map(|f| format!("{:3}", f.val())).collect::<Vec<_>>().join(", "));
+            println!("    [{}]", fold.witness_fold.m.iter().map(|f: &F| format!("{:3}", f.val())).collect::<Vec<_>>().join(", "));
             println!();
-            println!("  Fold validity:     {}", if fold.valid { "valid ✓" } else { "INVALID ✗" });
-            println!("  Soundness error:   1/{} ≈ {:.6}", params.q, 1.0 / params.q as f64);
-            println!("  Property checked:  L(m1+m2, r1+r2)·g = C1+C2  ✓");
+            println!("  Fold validity:    {}", if fold.valid { "valid ✓" } else { "INVALID ✗" });
+            println!("  Soundness error:  1/{} ≈ {:.6}", Q, 1.0 / Q as f64);
+            println!("  Property:         L(m1+m2, r1+r2)·g = C1+C2  ✓");
         }
         Err(e) => println!("  ERROR: {}", e),
     }
 
     // ----------------------------------------------------------------
-    // §5 — Tree Fold (N=8)
+    // §6 — Tree Fold (N=8)
     // ----------------------------------------------------------------
-    header(5, "Tree Fold  (N=8 witnesses, binary tree)");
+    header(6, "Tree Fold  (N=8 witnesses, binary tree)");
 
-    let mut rng3 = StdRng::seed_from_u64(99);
-    let g3 = random_sl2(params.q, &mut rng3);
-    let witnesses: Vec<Witness> = (0..8)
-        .map(|_| Witness::random_from_params(&params, &mut rng3))
-        .collect();
+    let mut rng4    = StdRng::seed_from_u64(99);
+    let session4: S = EgocSession::random(EgocParams::LEVEL1, &mut rng4);
+    let ws: Vec<_>  = (0..8).map(|_| session4.random_witness(&mut rng4)).collect();
 
-    println!("  N=8 witnesses, each n={}, q={}", params.n, params.q);
-    println!("  Binary tree: {} fold operations across {} levels", 8 - 1, 3);
+    println!("  N=8 witnesses, each n={}, q={}", session4.params.n, Q);
+    println!("  Binary tree: {} fold operations, {} levels", 7, 3);
     println!();
 
-    match tree_fold(witnesses, &g3, &mut rng3) {
+    match session4.tree_fold(ws, &mut rng4) {
         Ok(result) => {
             let (se_num, se_den) = result.soundness_err;
             println!("  Tree depth:        {}", result.depth);
@@ -184,42 +202,42 @@ fn main() {
                 se_num, se_den,
                 se_num as f64 / se_den as f64,
                 100.0 * se_num as f64 / se_den as f64);
-            println!("  Final proof size:  {} bytes  ({:.2} KB)", result.final_proof.byte_len(), result.final_proof.byte_len() as f64 / 1024.0);
+            println!("  Final proof size:  {} bytes  ({:.2} KB)",
+                result.final_proof.byte_len(),
+                result.final_proof.byte_len() as f64 / 1024.0);
             println!("  Final commit rows: {} (= 2n)", result.final_commit.matrix.rows().len());
             println!();
-            println!("  Final commit C[0] = [ {:3}, {:3} ]",
+            println!("  Final C[0] = [ {:3}, {:3} ]",
                 result.final_commit.matrix.rows()[0][0].val(),
                 result.final_commit.matrix.rows()[0][1].val());
-            println!("  Final proof z_m   = [{}]",
-                result.final_proof.z_m.iter().map(|f| format!("{:3}", f.val())).collect::<Vec<_>>().join(", "));
+            println!("  Final z_m  = [{}]",
+                result.final_proof.z_m.iter().map(|f: &F| format!("{:3}", f.val())).collect::<Vec<_>>().join(", "));
         }
         Err(e) => println!("  ERROR: {}", e),
     }
 
     // ----------------------------------------------------------------
-    // §6 — Known Answer Test (KAT)
+    // §7 — Known Answer Test (KAT)
     // ----------------------------------------------------------------
-    header(6, "Known Answer Test (KAT)  — deterministic test vector");
+    header(7, "Known Answer Test (KAT)  — deterministic test vector");
 
-    let mut kat_rng = StdRng::seed_from_u64(0);
-    let kat_g = random_sl2(params.q, &mut kat_rng);
+    let mut kat_rng     = StdRng::seed_from_u64(0);
+    let kat_session: S  = EgocSession::random(EgocParams::LEVEL1, &mut kat_rng);
 
-    let kat_m: Vec<Fp> = (1..=params.n as u64)
-        .map(|i| Fp::new(i, params.q))
-        .collect();
-    let kat_r: Vec<Fp> = vec![Fp::zero(params.q); params.n];
+    let kat_m: Vec<F> = (1..=kat_session.params.n as u64).map(|i| F::new(i)).collect();
+    let kat_r: Vec<F> = vec![F::zero(); kat_session.params.n];
 
     println!("  Fixed seed:  StdRng::seed_from_u64(0)");
-    println!("  m = [{}]", kat_m.iter().map(|f| format!("{}", f.val())).collect::<Vec<_>>().join(", "));
-    println!("  r = [{}]", kat_r.iter().map(|f| format!("{}", f.val())).collect::<Vec<_>>().join(", "));
-    println!("  q = {}", params.q);
+    println!("  m = [{}]", kat_m.iter().map(|f: &F| format!("{}", f.val())).collect::<Vec<_>>().join(", "));
+    println!("  r = [{}]", kat_r.iter().map(|f: &F| format!("{}", f.val())).collect::<Vec<_>>().join(", "));
+    println!("  q = {}", Q);
     println!();
-    println!("  g = [[{}, {}], [{}, {}]]  (det=1)",
-        kat_g.a.val(), kat_g.b.val(), kat_g.c.val(), kat_g.d.val());
+    let kg = &kat_session.gauge;
+    println!("  g = [[{}, {}], [{}, {}]]  (det=1)", kg.a.val(), kg.b.val(), kg.c.val(), kg.d.val());
     println!();
 
-    let kat_w   = Witness::new(kat_m, kat_r);
-    let kat_cmt = commit(&kat_w, &kat_g);
+    let kat_w   = egoc::Witness::<Q>::new(kat_m, kat_r);
+    let kat_cmt = kat_session.commit(&kat_w);
 
     println!("  Commitment matrix C = L(m,r)·g:");
     for (i, row) in kat_cmt.matrix.rows().iter().enumerate() {
@@ -230,28 +248,28 @@ fn main() {
     println!("    {}", kat_cmt.gauge_hash.iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(""));
     line();
 
-    match verify(&kat_w, &kat_g, &kat_cmt) {
+    match kat_session.verify(&kat_w, &kat_cmt) {
         Ok(())  => println!("  commit verify  → Ok  ✓"),
         Err(e)  => println!("  commit FAILED: {}", e),
     }
 
-    let kat_pf = prove(&kat_w, &kat_g, &kat_cmt.matrix, &mut kat_rng);
+    let kat_pf = kat_session.prove(&kat_w, &kat_cmt, &mut kat_rng);
     println!();
     println!("  Proof z_m = [{}]",
-        kat_pf.z_m.iter().map(|f| format!("{}", f.val())).collect::<Vec<_>>().join(", "));
+        kat_pf.z_m.iter().map(|f: &F| format!("{}", f.val())).collect::<Vec<_>>().join(", "));
     println!("  Proof z_r = [{}]",
-        kat_pf.z_r.iter().map(|f| format!("{}", f.val())).collect::<Vec<_>>().join(", "));
+        kat_pf.z_r.iter().map(|f: &F| format!("{}", f.val())).collect::<Vec<_>>().join(", "));
     println!();
 
-    match verify_proof(&kat_cmt.matrix, &kat_g, &kat_pf) {
+    match kat_session.verify_proof(&kat_cmt.matrix, &kat_pf) {
         Ok(())  => println!("  proof verify   → Ok  ✓"),
         Err(e)  => println!("  proof FAILED:  {}", e),
     }
 
     println!();
-    println!("{}", "═".repeat(62));
+    dline();
     println!("  All sections complete.");
-    println!("{}", "═".repeat(62));
+    dline();
     println!();
     println!("  Run benchmarks:  cargo bench -p egoc-bench");
     println!("  Run tests:       cargo test --workspace");

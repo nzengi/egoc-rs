@@ -5,6 +5,7 @@ edition.workspace = true
 authors.workspace = true
 
 [dependencies]
+egoc        = { workspace = true }
 egoc-field  = { workspace = true }
 egoc-sl2    = { workspace = true }
 egoc-commit = { workspace = true }

@@ -1,53 +1,49 @@
 //! `egoc-sl2` — SL(2,Fq) group element and operations.
 //!
-//! # Design (Committee: A1 de Valence, A4 Szalai, A5 DJB)
-//! - `SL2` is a 2×2 matrix [[a,b],[c,d]] with det=1 over Fq
-//! - Group multiplication, inverse, identity
-//! - Constant-time equality via `subtle`
-//! - `zeroize::Zeroize` — secret gauge elements wiped on drop
-//! - `random_sl2` uses `rand::CryptoRng` (OsRng in production)
+//! # Design
+//! `SL2<const Q: u64>` is a 2×2 matrix [[a,b],[c,d]] with det=1 over Fq.
+//! The field prime Q is encoded in the type, matching `Fp<Q>`.
+//! Group multiplication, inverse, identity, constant-time equality.
 
-use egoc_field::{Fp, random_fp};
+use egoc_field::{random_fp, Fp};
 use subtle::{Choice, ConstantTimeEq};
 use zeroize::Zeroize;
 
 pub use egoc_field::FieldError;
 
 // ---------------------------------------------------------------------------
-// SL2 — 2×2 matrix over Fq with det = 1
+// SL2<Q> — 2×2 matrix over Fq with det = 1
 // ---------------------------------------------------------------------------
 
-/// A group element g ∈ SL(2,Fq): [[a,b],[c,d]], det(g)=ad-bc≡1 (mod q).
+/// A group element g ∈ SL(2,Fq): [[a,b],[c,d]], det(g) = ad−bc ≡ 1 (mod Q).
 #[derive(Clone, Copy, Debug, Zeroize)]
-pub struct SL2 {
-    pub a: Fp,
-    pub b: Fp,
-    pub c: Fp,
-    pub d: Fp,
+pub struct SL2<const Q: u64> {
+    pub a: Fp<Q>,
+    pub b: Fp<Q>,
+    pub c: Fp<Q>,
+    pub d: Fp<Q>,
 }
 
-impl SL2 {
+impl<const Q: u64> SL2<Q> {
     /// Construct and verify det = 1.
-    pub fn new(a: Fp, b: Fp, c: Fp, d: Fp) -> Result<Self, SL2Error> {
+    pub fn new(a: Fp<Q>, b: Fp<Q>, c: Fp<Q>, d: Fp<Q>) -> Result<Self, SL2Error> {
         let det = a.mul(d).sub(b.mul(c));
-        if det != Fp::one(a.q()) {
+        if det != Fp::<Q>::one() {
             return Err(SL2Error::InvalidDeterminant(det.val()));
         }
         Ok(Self { a, b, c, d })
     }
 
     /// Identity element: [[1,0],[0,1]].
-    pub fn identity(q: u64) -> Self {
+    pub fn identity() -> Self {
         Self {
-            a: Fp::one(q), b: Fp::zero(q),
-            c: Fp::zero(q), d: Fp::one(q),
+            a: Fp::one(), b: Fp::zero(),
+            c: Fp::zero(), d: Fp::one(),
         }
     }
 
-    pub fn q(&self) -> u64 { self.a.q() }
-
-    /// Determinant (should always be 1 for valid elements).
-    pub fn det(&self) -> Fp { self.a.mul(self.d).sub(self.b.mul(self.c)) }
+    /// Determinant — always 1 for valid elements.
+    pub fn det(&self) -> Fp<Q> { self.a.mul(self.d).sub(self.b.mul(self.c)) }
 
     /// Group multiplication: self * rhs.
     pub fn mul(&self, rhs: &Self) -> Self {
@@ -57,9 +53,8 @@ impl SL2 {
             c: self.c.mul(rhs.a).add(self.d.mul(rhs.c)),
             d: self.c.mul(rhs.b).add(self.d.mul(rhs.d)),
         };
-        // det(AB) = det(A)·det(B) = 1·1 = 1 — verify in debug builds.
         debug_assert_eq!(
-            result.det(), Fp::one(self.q()),
+            result.det(), Fp::<Q>::one(),
             "SL2::mul produced det ≠ 1 — group invariant violated"
         );
         result
@@ -67,26 +62,15 @@ impl SL2 {
 
     /// Group inverse: [[d,-b],[-c,a]] (since det=1).
     pub fn inverse(&self) -> Self {
-        Self {
-            a:  self.d,
-            b:  self.b.neg(),
-            c:  self.c.neg(),
-            d:  self.a,
-        }
+        Self { a: self.d, b: self.b.neg(), c: self.c.neg(), d: self.a }
     }
 
-    /// Returns -g (negate all entries).  Note: det(-g) = det(g) when n is even.
-    /// For 2×2: det(-g) = (-a)(-d)-(-b)(-c) = ad-bc = det(g).
+    /// Negate all entries: −g. Note det(−g) = det(g) for 2×2.
     pub fn neg(&self) -> Self {
-        Self {
-            a: self.a.neg(),
-            b: self.b.neg(),
-            c: self.c.neg(),
-            d: self.d.neg(),
-        }
+        Self { a: self.a.neg(), b: self.b.neg(), c: self.c.neg(), d: self.d.neg() }
     }
 
-    /// Encode as 4 little-endian u64 values (for hashing).
+    /// Encode as 4 little-endian u64 values (32 bytes) for hashing.
     pub fn to_bytes(&self) -> [u8; 32] {
         let mut out = [0u8; 32];
         out[0..8].copy_from_slice(&self.a.val().to_le_bytes());
@@ -97,7 +81,7 @@ impl SL2 {
     }
 }
 
-impl ConstantTimeEq for SL2 {
+impl<const Q: u64> ConstantTimeEq for SL2<Q> {
     fn ct_eq(&self, other: &Self) -> Choice {
         self.a.ct_eq(&other.a)
             & self.b.ct_eq(&other.b)
@@ -106,17 +90,19 @@ impl ConstantTimeEq for SL2 {
     }
 }
 
-impl PartialEq for SL2 {
+impl<const Q: u64> PartialEq for SL2<Q> {
     fn eq(&self, other: &Self) -> bool { bool::from(self.ct_eq(other)) }
 }
-impl Eq for SL2 {}
+impl<const Q: u64> Eq for SL2<Q> {}
 
 // ---------------------------------------------------------------------------
 // Error
 // ---------------------------------------------------------------------------
 
+/// Error from SL2 construction.
 #[derive(Debug, thiserror::Error)]
 pub enum SL2Error {
+    /// The matrix has determinant ≠ 1.
     #[error("determinant is {0}, expected 1")]
     InvalidDeterminant(u64),
 }
@@ -127,20 +113,18 @@ pub enum SL2Error {
 
 /// Sample a uniformly random g ∈ SL(2,Fq).
 ///
-/// Method: sample (a,b,c) uniformly from Fq; set d = (1 + b*c) * a^{-1}.
-/// If a=0, retry.  Expected retries: 1/(1-1/q) ≈ 1 + 1/q for large q.
-pub fn random_sl2(q: u64, rng: &mut impl rand::RngCore) -> SL2 {
+/// Method: sample a ≠ 0, then b, c uniformly; set d = (1 + b·c) · a⁻¹.
+/// Expected retries: 1/(1 − 1/Q) ≈ 1 + 1/Q.
+pub fn random_sl2<const Q: u64>(rng: &mut impl rand::RngCore) -> SL2<Q> {
     loop {
-        let a = random_fp(q, rng);
+        let a: Fp<Q> = random_fp(rng);
         if bool::from(a.is_zero()) { continue; }
-        let b = random_fp(q, rng);
-        let c = random_fp(q, rng);
-        // d = (1 + b*c) / a
-        let num = Fp::one(q).add(b.mul(c));
-        let d   = num.mul(a.invert().expect("a != 0"));
-        // Verify (should always hold)
+        let b: Fp<Q> = random_fp(rng);
+        let c: Fp<Q> = random_fp(rng);
+        let num = Fp::<Q>::one().add(b.mul(c));
+        let d   = num.mul(a.inv_public());
         let det = a.mul(d).sub(b.mul(c));
-        if det == Fp::one(q) {
+        if det == Fp::<Q>::one() {
             return SL2 { a, b, c, d };
         }
     }
@@ -156,34 +140,32 @@ mod tests {
     use rand::SeedableRng;
     use rand::rngs::StdRng;
 
-    const Q: u64 = 101;
+    type G = SL2<101>;
 
     #[test]
     fn identity_det_one() {
-        let id = SL2::identity(Q);
-        assert_eq!(id.det(), Fp::one(Q));
+        assert_eq!(G::identity().det(), Fp::<101>::one());
     }
 
     #[test]
     fn mul_inverse_is_identity() {
         let mut rng = StdRng::seed_from_u64(7);
-        let g = random_sl2(Q, &mut rng);
-        let id = g.mul(&g.inverse());
-        assert_eq!(id, SL2::identity(Q));
+        let g: G = random_sl2(&mut rng);
+        assert_eq!(g.mul(&g.inverse()), G::identity());
     }
 
     #[test]
     fn det_preserved_under_mul() {
         let mut rng = StdRng::seed_from_u64(13);
-        let g = random_sl2(Q, &mut rng);
-        let h = random_sl2(Q, &mut rng);
-        assert_eq!(g.mul(&h).det(), Fp::one(Q));
+        let g: G = random_sl2(&mut rng);
+        let h: G = random_sl2(&mut rng);
+        assert_eq!(g.mul(&h).det(), Fp::<101>::one());
     }
 
     #[test]
     fn neg_det_preserved() {
         let mut rng = StdRng::seed_from_u64(17);
-        let g = random_sl2(Q, &mut rng);
+        let g: G = random_sl2(&mut rng);
         assert_eq!(g.neg().det(), g.det());
     }
 
@@ -191,8 +173,8 @@ mod tests {
     fn non_abelian() {
         let mut rng = StdRng::seed_from_u64(42);
         for _ in 0..100 {
-            let g = random_sl2(Q, &mut rng);
-            let h = random_sl2(Q, &mut rng);
+            let g: G = random_sl2(&mut rng);
+            let h: G = random_sl2(&mut rng);
             if g.mul(&h) != h.mul(&g) { return; }
         }
         panic!("All 100 pairs commuted — SL(2,Fq) should be non-abelian for Q>3");

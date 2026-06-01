@@ -1,5 +1,5 @@
 // E-GOC Criterion benchmarks
-// Updated: Phase 0 security fixes — ct_pow, u128 random, Choice verify
+// Updated: Fp<Q> const-generic refactor
 //
 // Committee owners:
 //   A5 Bernstein  — primitive / CT sections (field, sl2)
@@ -18,37 +18,35 @@ use criterion::{
     BatchSize, BenchmarkId, Criterion, Throughput,
 };
 use egoc_commit::{commit, gauge_hash, lift, verify, Witness};
-use egoc_field::{random_fp, random_nonzero};
+use egoc_field::{random_fp, random_nonzero, Fp};
 use egoc_ivc::{ivc_fold, tree_fold};
 use egoc_proof::{fiat_shamir_challenge, prove, verify_proof};
-use egoc_sl2::random_sl2;
+use egoc_sl2::{random_sl2, SL2};
 use rand::SeedableRng;
 use rand::rngs::StdRng;
 
 // ---------------------------------------------------------------------------
-// Parameter sets: (n, q, label)
-//   n4_q101   — small / debug
-//   n10_q257  — NIST Level I equivalent (primary target)
-//   n16_q257  — mid-range
-//   n24_q257  — heavy
+// Parameter sets: (n, label)
+//   All use Q=257 — the standard EGOC prime for Level I/III/V.
 // ---------------------------------------------------------------------------
-const PARAMS: &[(usize, u64, &str)] = &[
-    (4,  101, "n4_q101"),
-    (10, 257, "n10_q257"),
-    (16, 257, "n16_q257"),
-    (24, 257, "n24_q257"),
+const Q: u64 = 257;
+
+// (n, label) pairs — Q is fixed as a const generic
+const PARAMS_N: &[(usize, &str)] = &[
+    (4,  "n4_q257"),
+    (10, "n10_q257"),
+    (16, "n16_q257"),
+    (24, "n24_q257"),
 ];
 
 // Tree-fold scaling: witness counts
 const FOLD_SIZES: &[usize] = &[4, 8, 16, 32, 64, 128, 256];
 
-// Fixed field / group params for primitive benchmarks
-const PRIM_Q: u64   = 257;
+// Fixed n for primitive benchmarks
 const PRIM_N: usize = 10;
 
 // ---------------------------------------------------------------------------
 // Section 1 — Field primitives  (A5 Bernstein)
-// After Phase-0 fix: invert uses ct_pow (Fermat), random_fp uses u128 reduction
 // ---------------------------------------------------------------------------
 
 fn bench_field_primitives(c: &mut Criterion) {
@@ -58,34 +56,29 @@ fn bench_field_primitives(c: &mut Criterion) {
     group.throughput(Throughput::Elements(1));
 
     let mut rng = StdRng::seed_from_u64(0);
-    let a = random_nonzero(PRIM_Q, &mut rng);
-    let b = random_nonzero(PRIM_Q, &mut rng);
+    let a: Fp<Q> = random_nonzero(&mut rng);
+    let b: Fp<Q> = random_nonzero(&mut rng);
 
-    // Fp::add
     group.bench_function("add", |bench| {
         bench.iter(|| black_box(a).add(black_box(b)))
     });
 
-    // Fp::mul
     group.bench_function("mul", |bench| {
         bench.iter(|| black_box(a).mul(black_box(b)))
     });
 
-    // Fp::invert — ct_pow Fermat (was ext_gcd_inv, now constant-time)
     group.bench_function("invert_ct_pow", |bench| {
         bench.iter(|| black_box(a).invert())
     });
 
-    // random_fp — u128 two-call reduction (was next_u64 % q)
     group.bench_function("random_fp_u128", |bench| {
         let mut rng2 = StdRng::seed_from_u64(1);
-        bench.iter(|| random_fp(PRIM_Q, &mut rng2))
+        bench.iter(|| random_fp::<Q>(&mut rng2))
     });
 
-    // random_nonzero
     group.bench_function("random_nonzero", |bench| {
         let mut rng2 = StdRng::seed_from_u64(2);
-        bench.iter(|| random_nonzero(PRIM_Q, &mut rng2))
+        bench.iter(|| random_nonzero::<Q>(&mut rng2))
     });
 
     group.finish();
@@ -102,33 +95,28 @@ fn bench_sl2(c: &mut Criterion) {
     group.throughput(Throughput::Elements(1));
 
     let mut rng = StdRng::seed_from_u64(10);
-    let g = random_sl2(PRIM_Q, &mut rng);
-    let h = random_sl2(PRIM_Q, &mut rng);
+    let g: SL2<Q> = random_sl2(&mut rng);
+    let h: SL2<Q> = random_sl2(&mut rng);
 
-    // Group multiply
     group.bench_function("mul", |bench| {
         bench.iter(|| black_box(g).mul(black_box(&h)))
     });
 
-    // Group inverse
     group.bench_function("inverse", |bench| {
         bench.iter(|| black_box(g).inverse())
     });
 
-    // Negate (cross-gauge attack defence: -g)
     group.bench_function("neg", |bench| {
         bench.iter(|| black_box(g).neg())
     });
 
-    // Serialise to bytes (used in BLAKE3 hashing)
     group.bench_function("to_bytes", |bench| {
         bench.iter(|| black_box(g).to_bytes())
     });
 
-    // Sample a random element (rejection sampling)
     group.bench_function("random_sl2", |bench| {
         let mut rng2 = StdRng::seed_from_u64(11);
-        bench.iter(|| random_sl2(PRIM_Q, &mut rng2))
+        bench.iter(|| random_sl2::<Q>(&mut rng2))
     });
 
     group.finish();
@@ -136,8 +124,6 @@ fn bench_sl2(c: &mut Criterion) {
 
 // ---------------------------------------------------------------------------
 // Section 3 — BLAKE3 operations  (A2 O'Connor)
-// gauge_hash: H(g) — cross-gauge binding
-// fiat_shamir_challenge: u128 reduction (was u64)
 // ---------------------------------------------------------------------------
 
 fn bench_blake3(c: &mut Criterion) {
@@ -147,23 +133,21 @@ fn bench_blake3(c: &mut Criterion) {
     group.throughput(Throughput::Elements(1));
 
     let mut rng = StdRng::seed_from_u64(20);
-    let g   = random_sl2(PRIM_Q, &mut rng);
-    let w   = Witness::random(PRIM_N, PRIM_Q, &mut rng);
+    let g: SL2<Q>  = random_sl2(&mut rng);
+    let w: Witness<Q> = Witness::random(PRIM_N, &mut rng);
     let cmt = commit(&w, &g);
     let pf  = prove(&w, &g, &cmt.matrix, &mut rng);
 
-    // gauge_hash — BLAKE3(g.to_bytes())
     group.bench_function("gauge_hash", |bench| {
         bench.iter(|| gauge_hash(black_box(&g)))
     });
 
-    // fiat_shamir_challenge — q derived from CommitMatrix (no raw q param)
     group.bench_function("fiat_shamir_u128", |bench| {
         bench.iter(|| {
             fiat_shamir_challenge(
                 black_box(&cmt.matrix),
                 black_box(&g),
-                black_box(&pf.a_rows),
+                black_box(&pf.a),
             )
         })
     });
@@ -173,7 +157,6 @@ fn bench_blake3(c: &mut Criterion) {
 
 // ---------------------------------------------------------------------------
 // Section 4 — Lift map  (A1 de Valence, A4 Szalai)
-// L(m,r) ∈ Fq^{2n×2} — isolated from commit to measure layout cost
 // ---------------------------------------------------------------------------
 
 fn bench_lift(c: &mut Criterion) {
@@ -182,9 +165,9 @@ fn bench_lift(c: &mut Criterion) {
     group.sample_size(300);
     group.throughput(Throughput::Elements(1));
 
-    for &(n, q, label) in PARAMS {
+    for &(n, label) in PARAMS_N {
         let mut rng = StdRng::seed_from_u64(30);
-        let w = Witness::random(n, q, &mut rng);
+        let w: Witness<Q> = Witness::random(n, &mut rng);
         group.bench_with_input(BenchmarkId::new("lift", label), label, |b, _| {
             b.iter(|| lift(black_box(&w)))
         });
@@ -194,7 +177,6 @@ fn bench_lift(c: &mut Criterion) {
 
 // ---------------------------------------------------------------------------
 // Section 5 — Commit / Verify  (A6 Heninger, A1 de Valence)
-// verify: now fully constant-time via Choice accumulation (Phase-0 fix)
 // ---------------------------------------------------------------------------
 
 fn bench_commit(c: &mut Criterion) {
@@ -203,10 +185,10 @@ fn bench_commit(c: &mut Criterion) {
     group.sample_size(200);
     group.throughput(Throughput::Elements(1));
 
-    for &(n, q, label) in PARAMS {
+    for &(n, label) in PARAMS_N {
         let mut rng = StdRng::seed_from_u64(40);
-        let w = Witness::random(n, q, &mut rng);
-        let g = random_sl2(q, &mut rng);
+        let w: Witness<Q> = Witness::random(n, &mut rng);
+        let g: SL2<Q>     = random_sl2(&mut rng);
         group.bench_with_input(BenchmarkId::new("commit", label), label, |b, _| {
             b.iter(|| commit(black_box(&w), black_box(&g)))
         });
@@ -220,10 +202,10 @@ fn bench_verify(c: &mut Criterion) {
     group.sample_size(200);
     group.throughput(Throughput::Elements(1));
 
-    for &(n, q, label) in PARAMS {
+    for &(n, label) in PARAMS_N {
         let mut rng = StdRng::seed_from_u64(41);
-        let w   = Witness::random(n, q, &mut rng);
-        let g   = random_sl2(q, &mut rng);
+        let w: Witness<Q> = Witness::random(n, &mut rng);
+        let g: SL2<Q>     = random_sl2(&mut rng);
         let cmt = commit(&w, &g);
         group.bench_with_input(BenchmarkId::new("verify", label), label, |b, _| {
             b.iter(|| verify(black_box(&w), black_box(&g), black_box(&cmt)))
@@ -234,7 +216,6 @@ fn bench_verify(c: &mut Criterion) {
 
 // ---------------------------------------------------------------------------
 // Section 6 — NIZKP Prove / Verify  (A2 O'Connor, A3 Bowe, A5 Bernstein)
-// verify_proof: now uses Choice accumulation — no short-circuit (Phase-0 fix)
 // ---------------------------------------------------------------------------
 
 fn bench_prove(c: &mut Criterion) {
@@ -242,10 +223,10 @@ fn bench_prove(c: &mut Criterion) {
     group.measurement_time(Duration::from_secs(5));
     group.throughput(Throughput::Elements(1));
 
-    for &(n, q, label) in PARAMS {
+    for &(n, label) in PARAMS_N {
         let mut rng = StdRng::seed_from_u64(50);
-        let w   = Witness::random(n, q, &mut rng);
-        let g   = random_sl2(q, &mut rng);
+        let w: Witness<Q> = Witness::random(n, &mut rng);
+        let g: SL2<Q>     = random_sl2(&mut rng);
         let cmt = commit(&w, &g);
         group.bench_with_input(BenchmarkId::new("prove", label), label, |b, _| {
             let mut rng2 = StdRng::seed_from_u64(99);
@@ -260,10 +241,10 @@ fn bench_verify_proof(c: &mut Criterion) {
     group.measurement_time(Duration::from_secs(5));
     group.throughput(Throughput::Elements(1));
 
-    for &(n, q, label) in PARAMS {
+    for &(n, label) in PARAMS_N {
         let mut rng = StdRng::seed_from_u64(51);
-        let w   = Witness::random(n, q, &mut rng);
-        let g   = random_sl2(q, &mut rng);
+        let w: Witness<Q> = Witness::random(n, &mut rng);
+        let g: SL2<Q>     = random_sl2(&mut rng);
         let cmt = commit(&w, &g);
         let pf  = prove(&w, &g, &cmt.matrix, &mut rng);
         group.bench_with_input(BenchmarkId::new("verify_proof", label), label, |b, _| {
@@ -282,11 +263,11 @@ fn bench_fold(c: &mut Criterion) {
     group.measurement_time(Duration::from_secs(5));
     group.throughput(Throughput::Elements(1));
 
-    for &(n, q, label) in PARAMS {
+    for &(n, label) in PARAMS_N {
         let mut rng = StdRng::seed_from_u64(60);
-        let w1 = Witness::random(n, q, &mut rng);
-        let w2 = Witness::random(n, q, &mut rng);
-        let g  = random_sl2(q, &mut rng);
+        let w1: Witness<Q> = Witness::random(n, &mut rng);
+        let w2: Witness<Q> = Witness::random(n, &mut rng);
+        let g:  SL2<Q>     = random_sl2(&mut rng);
         group.bench_with_input(BenchmarkId::new("fold", label), label, |b, _| {
             let mut rng2 = StdRng::seed_from_u64(77);
             b.iter(|| ivc_fold(black_box(&w1), black_box(&w2), black_box(&g), &mut rng2))
@@ -297,8 +278,6 @@ fn bench_fold(c: &mut Criterion) {
 
 // ---------------------------------------------------------------------------
 // Section 8 — Tree Fold Scaling  (A3 Bowe)
-// N = 4, 8, 16, 32, 64 witnesses — shows O(n·log N) scaling
-// Uses iter_batched to avoid measuring witness clone overhead
 // ---------------------------------------------------------------------------
 
 fn bench_tree_fold_scaling(c: &mut Criterion) {
@@ -306,15 +285,12 @@ fn bench_tree_fold_scaling(c: &mut Criterion) {
     group.measurement_time(Duration::from_secs(8));
     group.sample_size(50);
 
-    let q = PRIM_Q;
-    let n = PRIM_N;
-
     for &size in FOLD_SIZES {
-        let label = format!("N{}_n{}_q{}", size, n, q);
+        let label = format!("N{}_n{}_q{}", size, PRIM_N, Q);
         let mut rng = StdRng::seed_from_u64(70);
-        let g = random_sl2(q, &mut rng);
-        let witnesses: Vec<Witness> = (0..size)
-            .map(|_| Witness::random(n, q, &mut rng))
+        let g: SL2<Q> = random_sl2(&mut rng);
+        let witnesses: Vec<Witness<Q>> = (0..size)
+            .map(|_| Witness::random(PRIM_N, &mut rng))
             .collect();
 
         group.throughput(Throughput::Elements(size as u64));
@@ -342,20 +318,14 @@ fn bench_tree_fold_scaling(c: &mut Criterion) {
 
 criterion_group!(
     benches,
-    // Section 1 — primitives
     bench_field_primitives,
     bench_sl2,
-    // Section 2 — BLAKE3
     bench_blake3,
-    // Section 3 — lift
     bench_lift,
-    // Section 4 — commit/verify
     bench_commit,
     bench_verify,
-    // Section 5 — NIZKP
     bench_prove,
     bench_verify_proof,
-    // Section 6 — IVC
     bench_fold,
     bench_tree_fold_scaling,
 );

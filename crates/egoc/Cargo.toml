@@ -1,0 +1,18 @@
+[package]
+name        = "egoc"
+description = "E-GOC: Efficient Group-Orbit Commitment — unified session API"
+version.workspace    = true
+edition.workspace    = true
+authors.workspace    = true
+license.workspace    = true
+repository.workspace = true
+
+[dependencies]
+egoc-field  = { workspace = true }
+egoc-sl2    = { workspace = true }
+egoc-commit = { workspace = true }
+egoc-proof  = { workspace = true }
+egoc-ivc    = { workspace = true }
+rand        = { workspace = true }
+zeroize     = { workspace = true }
+thiserror   = { workspace = true }

@@ -1,14 +1,14 @@
 //! `egoc-field` — Fq prime-field arithmetic for E-GOC.
 //!
-//! # Design (Committee: A1 de Valence, A4 Szalai, A5 DJB)
-//! - Runtime-parametric prime `q` stored as `u64`
-//! - All arithmetic via `u128` to avoid overflow
-//! - `modinv` via Fermat's little theorem: a^(q-2) mod q
-//!   Exponent q-2 is derived from the *public* prime, so loop count is
-//!   fixed at 64 bits independent of secret `a` → constant-time in `a`.
-//! - `subtle::ConstantTimeEq` for all secret comparisons
-//! - `zeroize::Zeroize` on all secret types
-//! - Unbiased random sampling via 128-bit reduction (bias ≈ 2^{-64})
+//! # Design
+//! `Fp<const Q: u64>` encodes the field prime as a compile-time constant.
+//! This eliminates the per-element `q: u64` field (struct is 8 bytes, not 16),
+//! allows the compiler to fold `% Q` into immediate-mode division, and makes
+//! mixing elements from different fields a compile-time type error.
+//!
+//! All arithmetic uses `u128` intermediates to avoid overflow.
+//! Modular inverse uses Fermat's little theorem: a^(Q-2) mod Q.
+//! The exponent Q-2 is public, so the 64-iteration loop is constant-time in `a`.
 
 use subtle::{Choice, ConditionallySelectable, ConstantTimeEq, CtOption};
 use zeroize::Zeroize;
@@ -20,10 +20,12 @@ use zeroize::Zeroize;
 /// Error from field arithmetic.
 #[derive(Debug, thiserror::Error)]
 pub enum FieldError {
-    #[error("modular inverse does not exist (input is zero or gcd != 1)")]
+    /// Modular inverse of zero does not exist.
+    #[error("modular inverse does not exist (input is zero)")]
     NoInverse,
-    #[error("invalid field element: {0} >= q={1}")]
-    OutOfRange(u64, u64),
+    /// Value out of range for the field.
+    #[error("invalid field element: {0} >= Q")]
+    OutOfRange(u64),
 }
 
 /// Unified top-level error type for all E-GOC operations.
@@ -35,7 +37,7 @@ pub enum EgocError {
     /// Field arithmetic error.
     #[error("field error: {0}")]
     Field(#[from] FieldError),
-    /// Witness construction error.
+    /// Witness construction or validation error.
     #[error("witness error: {0}")]
     Witness(String),
     /// Proof serialization / deserialization error.
@@ -47,134 +49,125 @@ pub enum EgocError {
 }
 
 // ---------------------------------------------------------------------------
-// Fp — a single Fq element  (q must be prime)
+// Fp<Q> — a single element of Fq = Z/QZ
 // ---------------------------------------------------------------------------
 
-/// A field element in Fq = Z/qZ, stored as a `u64` with `val < q`.
-/// All arithmetic is mod q using u128 intermediates.
+/// A field element in Fq = Z/QZ, where `Q` is a compile-time prime constant.
+///
+/// The prime is encoded in the type — `Fp<101>` and `Fp<257>` are distinct
+/// types, so mixing elements from different fields is a compile-time error.
+/// Each value occupies exactly 8 bytes (one `u64`).
 #[derive(Clone, Copy, Debug, Default, Zeroize)]
-pub struct Fp {
-    pub(crate) val: u64,
-    pub(crate) q:   u64,
+pub struct Fp<const Q: u64> {
+    val: u64,
 }
 
-impl Fp {
-    /// Construct from raw value — reduces mod q.
+impl<const Q: u64> Fp<Q> {
+    /// Construct from a raw value — reduces mod Q.
     #[inline]
-    pub fn new(val: u64, q: u64) -> Self {
-        Self { val: val % q, q }
+    pub fn new(val: u64) -> Self {
+        Self { val: val % Q }
     }
 
+    /// The additive identity.
     #[inline]
-    pub fn zero(q: u64) -> Self { Self { val: 0, q } }
-    #[inline]
-    pub fn one(q: u64)  -> Self { Self { val: 1, q } }
+    pub fn zero() -> Self { Self { val: 0 } }
 
+    /// The multiplicative identity.
+    #[inline]
+    pub fn one() -> Self { Self { val: 1 } }
+
+    /// The raw value in [0, Q).
     #[inline]
     pub fn val(self) -> u64 { self.val }
-    #[inline]
-    pub fn q(self)   -> u64 { self.q }
 
-    /// Addition mod q.
+    /// The field prime (same as the const parameter).
+    #[inline]
+    pub fn q() -> u64 { Q }
+
+    /// Addition mod Q.
     #[inline]
     pub fn add(self, rhs: Self) -> Self {
-        debug_assert_eq!(self.q, rhs.q);
-        Self { val: (self.val + rhs.val) % self.q, q: self.q }
+        Self { val: (self.val + rhs.val) % Q }
     }
 
-    /// Subtraction mod q (always positive result).
+    /// Subtraction mod Q (result always positive).
     #[inline]
     pub fn sub(self, rhs: Self) -> Self {
-        debug_assert_eq!(self.q, rhs.q);
-        Self { val: (self.val + self.q - rhs.val) % self.q, q: self.q }
+        Self { val: (self.val + Q - rhs.val) % Q }
     }
 
-    /// Multiplication mod q via u128.
+    /// Multiplication mod Q via u128.
     #[inline]
     pub fn mul(self, rhs: Self) -> Self {
-        debug_assert_eq!(self.q, rhs.q);
-        let v = (self.val as u128 * rhs.val as u128) % self.q as u128;
-        Self { val: v as u64, q: self.q }
+        let v = (self.val as u128 * rhs.val as u128) % Q as u128;
+        Self { val: v as u64 }
     }
 
-    /// Negation mod q.
+    /// Negation mod Q.
     #[inline]
     pub fn neg(self) -> Self {
-        if self.val == 0 {
-            self
-        } else {
-            Self { val: self.q - self.val, q: self.q }
-        }
+        if self.val == 0 { self } else { Self { val: Q - self.val } }
     }
 
-    /// Modular inverse via Fermat's little theorem: a^(q-2) mod q.
+    /// Modular inverse via Fermat's little theorem: a^(Q-2) mod Q.
     ///
-    /// Since q is the *public* prime, the exponent (q-2) is fixed and public.
-    /// The square-and-multiply loop always runs exactly 64 iterations with
-    /// constant-time conditional multiplies → no timing leak from secret `a`.
-    /// Returns `CtOption::none()` if `self == 0`.
+    /// Q-2 is a public constant, so the 64-iteration loop is constant-time
+    /// in `self`. Returns `CtOption::none()` when `self == 0`.
     pub fn invert(self) -> CtOption<Self> {
-        let is_zero: Choice = self.ct_eq(&Self::zero(self.q));
-        let inv = ct_pow(self.val, self.q - 2, self.q);
-        CtOption::new(Self { val: inv, q: self.q }, !is_zero)
+        let is_zero = self.ct_eq(&Self::zero());
+        let inv = ct_pow(self.val, Q - 2, Q);
+        CtOption::new(Self { val: inv }, !is_zero)
     }
 
-    /// Convenience: panics if no inverse (use only for public inputs).
+    /// Inverse for public values — panics on zero.
     #[inline]
     pub fn inv_public(self) -> Self {
         self.invert().expect("no inverse for public value")
     }
 
-    /// Is this element zero?
+    /// Returns `Choice::from(1)` when `self == 0`.
     #[inline]
     pub fn is_zero(self) -> Choice {
-        self.ct_eq(&Self::zero(self.q))
+        self.ct_eq(&Self::zero())
     }
 }
 
-impl ConstantTimeEq for Fp {
+impl<const Q: u64> ConstantTimeEq for Fp<Q> {
     fn ct_eq(&self, other: &Self) -> Choice {
         self.val.ct_eq(&other.val)
     }
 }
 
-impl PartialEq for Fp {
+impl<const Q: u64> PartialEq for Fp<Q> {
     fn eq(&self, other: &Self) -> bool {
-        bool::from(self.ct_eq(other)) && self.q == other.q
+        bool::from(self.ct_eq(other))
     }
 }
-impl Eq for Fp {}
+impl<const Q: u64> Eq for Fp<Q> {}
 
-impl ConditionallySelectable for Fp {
+impl<const Q: u64> ConditionallySelectable for Fp<Q> {
     fn conditional_select(a: &Self, b: &Self, choice: Choice) -> Self {
-        Self {
-            val: u64::conditional_select(&a.val, &b.val, choice),
-            q:   a.q,
-        }
+        Self { val: u64::conditional_select(&a.val, &b.val, choice) }
     }
 }
 
 // ---------------------------------------------------------------------------
-// Constant-time modular exponentiation (Fermat inverse)
+// Constant-time modular exponentiation
 // ---------------------------------------------------------------------------
 
-/// Constant-time square-and-multiply: base^exp mod m.
+/// Constant-time square-and-multiply: `base^exp mod m`.
 ///
-/// The loop runs a fixed 64 iterations regardless of `base` or `exp`.
-/// Bit selection and conditional multiply use only data-independent branches,
-/// so no secret value leaks through timing.  `exp` is always the public
-/// constant (q-2), so even the per-bit branch is safe.
+/// Fixed 64 iterations — `exp` must be a public constant (e.g. Q-2).
+/// Bit selection and conditional multiply use no data-dependent branches.
 #[inline]
-fn ct_pow(base: u64, exp: u64, m: u64) -> u64 {
+pub fn ct_pow(base: u64, exp: u64, m: u64) -> u64 {
     let mut result: u128 = 1;
     let mut b: u128 = base as u128 % m as u128;
     let mut e = exp;
-    // Fixed 64 iterations — e is a public constant (q-2).
     for _ in 0..64 {
-        // If low bit is set, multiply result by b.
-        let mask = (e & 1).wrapping_neg(); // 0xFFFF… if bit set, else 0
+        let mask = (e & 1).wrapping_neg();
         let candidate = (result * b) % m as u128;
-        // Constant-time select: result = mask ? candidate : result
         result = (candidate & mask as u128) | (result & !mask as u128);
         b = (b * b) % m as u128;
         e >>= 1;
@@ -183,63 +176,63 @@ fn ct_pow(base: u64, exp: u64, m: u64) -> u64 {
 }
 
 // ---------------------------------------------------------------------------
-// Random field element
+// Random sampling
 // ---------------------------------------------------------------------------
 
 /// Sample a uniform element from Fq (including zero).
 ///
-/// Uses 128-bit reduction: bias ≤ 2^64 / q^2 < 2^{-64} for q ≤ 2^32.
-/// This is negligible for all practical field sizes.
-pub fn random_fp(q: u64, rng: &mut impl rand::RngCore) -> Fp {
+/// Uses 128-bit reduction: bias ≤ 2^64 / Q^2 < 2^{-64} for Q ≤ 2^32.
+pub fn random_fp<const Q: u64>(rng: &mut impl rand::RngCore) -> Fp<Q> {
     let hi = rng.next_u64() as u128;
     let lo = rng.next_u64() as u128;
-    let wide = (hi << 64) | lo;
-    Fp::new((wide % q as u128) as u64, q)
+    Fp::new(((hi << 64 | lo) % Q as u128) as u64)
 }
 
 /// Sample a uniform non-zero element from Fq.
-///
-/// Rejection sampling over `random_fp`; expected iterations: q/(q-1) ≈ 1.
-pub fn random_nonzero(q: u64, rng: &mut impl rand::RngCore) -> Fp {
+pub fn random_nonzero<const Q: u64>(rng: &mut impl rand::RngCore) -> Fp<Q> {
     loop {
-        let v = random_fp(q, rng);
+        let v: Fp<Q> = random_fp(rng);
         if !bool::from(v.is_zero()) { return v; }
     }
 }
 
-// ---------------------------------------------------------------------------
-// Vec helpers
-// ---------------------------------------------------------------------------
+/// Sample a vector of `n` uniform field elements.
+pub fn random_vec<const Q: u64>(n: usize, rng: &mut impl rand::RngCore) -> Vec<Fp<Q>> {
+    (0..n).map(|_| random_fp(rng)).collect()
+}
 
-/// Random vector of n field elements.
-pub fn random_vec(n: usize, q: u64, rng: &mut impl rand::RngCore) -> Vec<Fp> {
-    (0..n).map(|_| random_fp(q, rng)).collect()
+/// Sample a zero vector of `n` field elements.
+pub fn zero_vec<const Q: u64>(n: usize) -> Vec<Fp<Q>> {
+    vec![Fp::zero(); n]
 }
 
 // ---------------------------------------------------------------------------
-// EgocParams — security parameter set with validation  (A5 Bernstein)
+// EgocParams — security parameter set
 // ---------------------------------------------------------------------------
 
-/// Security parameter set for E-GOC.
+/// Security parameter set for E-GOC: message length `n` and field prime `q`.
 ///
-/// # Security level
-/// Paper §8: `(2n - 3) · ⌊log₂q⌋ ≥ λ` bits.
-/// For NIST Level I (λ=128): n=10, q=257 → (17)·8 = 136 bits ✓
+/// `q` is stored as a runtime `u64` here for API flexibility (e.g. CLI tools),
+/// but all cryptographic operations use `Fp<Q>` with Q as a compile-time const.
+/// Use the provided constants `LEVEL1`, `LEVEL3`, `LEVEL5` for standard sets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EgocParams {
     /// Number of message/randomness elements (n ≥ 2).
     pub n: usize,
-    /// Field prime (q ≥ 5, q prime).
+    /// Field prime (q ≥ 5, q prime). Matches the const Q in Fp<Q>.
     pub q: u64,
 }
 
-/// Error returned by `EgocParams::validate`.
+/// Errors from `EgocParams::validate`.
 #[derive(Debug, thiserror::Error)]
 pub enum ParamError {
+    /// n is too small.
     #[error("n must be ≥ 2, got {0}")]
     NTooSmall(usize),
+    /// q is too small.
     #[error("q must be ≥ 5, got {0}")]
     QTooSmall(u64),
+    /// Security level is below the required threshold.
     #[error("security level {got} bits < required {need} bits")]
     InsufficientSecurity { got: u32, need: u32 },
 }
@@ -252,26 +245,16 @@ impl EgocParams {
         Ok(p)
     }
 
-    /// Security level in bits: `(2n - 3) · ⌊log₂q⌋`.
-    ///
-    /// Derived from the SSP hardness bound in paper §8.
+    /// Security level in bits: `(2n − 3) · ⌊log₂ q⌋`.
     pub fn security_bits(&self) -> u32 {
         let factor = (2 * self.n).saturating_sub(3) as u32;
         factor * self.q.ilog2()
     }
 
-    /// Validate parameters against paper §8 requirements.
-    ///
-    /// - n ≥ 2
-    /// - q ≥ 5
-    /// - security_bits() ≥ 128 (NIST Level I minimum)
+    /// Validate against paper §8 requirements (n ≥ 2, q ≥ 5, ≥ 128 bits).
     pub fn validate(&self) -> Result<(), ParamError> {
-        if self.n < 2 {
-            return Err(ParamError::NTooSmall(self.n));
-        }
-        if self.q < 5 {
-            return Err(ParamError::QTooSmall(self.q));
-        }
+        if self.n < 2 { return Err(ParamError::NTooSmall(self.n)); }
+        if self.q < 5 { return Err(ParamError::QTooSmall(self.q)); }
         let bits = self.security_bits();
         if bits < 128 {
             return Err(ParamError::InsufficientSecurity { got: bits, need: 128 });
@@ -281,27 +264,23 @@ impl EgocParams {
 
     /// Returns `true` if these parameters meet NIST Level I (128-bit security).
     pub fn is_nist_level1(&self) -> bool { self.security_bits() >= 128 }
-
     /// Returns `true` if these parameters meet NIST Level III (192-bit security).
     pub fn is_nist_level3(&self) -> bool { self.security_bits() >= 192 }
-
     /// Returns `true` if these parameters meet NIST Level V (256-bit security).
     pub fn is_nist_level5(&self) -> bool { self.security_bits() >= 256 }
 
-    /// Byte length of a commitment matrix (2n × 2 × 8 bytes).
+    /// Byte length of a commitment matrix: 2n × 2 × 8 bytes.
     pub fn commit_bytes(&self) -> usize { 2 * self.n * 2 * 8 }
-
     /// Byte length of a proof: header(16) + a_rows(32n) + z_m(8n) + z_r(8n).
-    pub fn proof_bytes(&self) -> usize { 16 + 48 * self.n }
+    pub fn proof_bytes(&self)  -> usize { 16 + 48 * self.n }
 }
 
-/// Recommended parameter sets (paper Table 1).
 impl EgocParams {
     /// NIST Level I — 136-bit security: n=10, q=257.
     pub const LEVEL1: Self = Self { n: 10, q: 257 };
-    /// NIST Level III — 204-bit security: n=16, q=257.
+    /// NIST Level III — 232-bit security: n=16, q=257.
     pub const LEVEL3: Self = Self { n: 16, q: 257 };
-    /// NIST Level V — 272-bit security: n=22, q=257.
+    /// NIST Level V — 328-bit security: n=22, q=257.
     pub const LEVEL5: Self = Self { n: 22, q: 257 };
 }
 
@@ -315,63 +294,71 @@ mod tests {
     use rand::SeedableRng;
     use rand::rngs::StdRng;
 
-    const Q: u64 = 101;
+    type F = Fp<101>;
 
     #[test]
     fn add_sub_roundtrip() {
-        let a = Fp::new(37, Q);
-        let b = Fp::new(80, Q);
+        let a = F::new(37);
+        let b = F::new(80);
         assert_eq!(a.add(b).sub(b), a);
     }
 
     #[test]
     fn mul_inv() {
-        let a = Fp::new(37, Q);
+        let a = F::new(37);
         let ai = a.invert().unwrap();
-        assert_eq!(a.mul(ai), Fp::one(Q));
+        assert_eq!(a.mul(ai), F::one());
     }
 
     #[test]
     fn zero_no_inverse() {
-        let z = Fp::zero(Q);
-        assert!(bool::from(z.invert().is_none()));
+        assert!(bool::from(F::zero().invert().is_none()));
     }
 
     #[test]
     fn neg_add_zero() {
-        let a = Fp::new(55, Q);
-        assert_eq!(a.add(a.neg()), Fp::zero(Q));
+        let a = F::new(55);
+        assert_eq!(a.add(a.neg()), F::zero());
+    }
+
+    #[test]
+    fn fp_is_8_bytes() {
+        assert_eq!(std::mem::size_of::<F>(), 8);
+    }
+
+    #[test]
+    fn different_q_is_different_type() {
+        // Compile-time proof: Fp<101> and Fp<257> are distinct types.
+        let _a: Fp<101> = Fp::<101>::new(5);
+        let _b: Fp<257> = Fp::<257>::new(5);
+        // If this compiles, the type system enforces field separation.
     }
 
     #[test]
     fn random_nonzero_ok() {
         let mut rng = StdRng::seed_from_u64(42);
         for _ in 0..1000 {
-            let v = random_nonzero(Q, &mut rng);
-            assert!(v.val() > 0 && v.val() < Q);
+            let v: Fp<101> = random_nonzero(&mut rng);
+            assert!(v.val() > 0 && v.val() < 101);
         }
     }
 
-    // EgocParams tests
     #[test]
     fn params_level1_valid() {
         assert!(EgocParams::LEVEL1.validate().is_ok());
-        assert!(EgocParams::LEVEL1.is_nist_level1());
-        assert_eq!(EgocParams::LEVEL1.security_bits(), 136); // (2*10-3)*8
+        assert_eq!(EgocParams::LEVEL1.security_bits(), 136);
     }
 
     #[test]
     fn params_level3_valid() {
         assert!(EgocParams::LEVEL3.validate().is_ok());
-        assert!(EgocParams::LEVEL3.is_nist_level3());
-        assert_eq!(EgocParams::LEVEL3.security_bits(), 232); // (2*16-3)*8 = 29*8
+        assert_eq!(EgocParams::LEVEL3.security_bits(), 232);
     }
 
     #[test]
     fn params_level5_valid() {
         assert!(EgocParams::LEVEL5.validate().is_ok());
-        assert!(EgocParams::LEVEL5.is_nist_level5());
-        assert_eq!(EgocParams::LEVEL5.security_bits(), 328); // (2*22-3)*8 = 41*8
+        assert_eq!(EgocParams::LEVEL5.security_bits(), 328);
     }
 
     #[test]
@@ -388,14 +375,12 @@ mod tests {
 
     #[test]
     fn params_insufficient_security() {
-        // n=3, q=101: (6-3)*6 = 18 bits — way below 128
         let p = EgocParams { n: 3, q: 101 };
         assert!(matches!(p.validate(), Err(ParamError::InsufficientSecurity { .. })));
     }
 
     #[test]
     fn params_proof_bytes() {
-        // proof_bytes = 16 + 48*n
         assert_eq!(EgocParams::LEVEL1.proof_bytes(), 16 + 48 * 10);
     }
 

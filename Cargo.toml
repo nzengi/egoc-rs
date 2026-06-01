@@ -6,6 +6,7 @@ members = [
     "crates/egoc-commit",
     "crates/egoc-proof",
     "crates/egoc-ivc",
+    "crates/egoc",
     "crates/egoc-bench",
 ]
 
@@ -25,6 +26,7 @@ thiserror = { version = "1.0" }
 serde    = { version = "1.0",  features = ["derive"] }
 criterion = { version = "0.5", features = ["html_reports"] }
 
+egoc        = { path = "crates/egoc" }
 egoc-field  = { path = "crates/egoc-field" }
 egoc-sl2    = { path = "crates/egoc-sl2" }
 egoc-commit = { path = "crates/egoc-commit" }
