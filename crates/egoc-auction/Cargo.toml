@@ -1,0 +1,16 @@
+[package]
+name        = "egoc-auction"
+description = "Sealed-bid auction example using E-GOC commitment scheme"
+version.workspace    = true
+edition.workspace    = true
+authors.workspace    = true
+license.workspace    = true
+repository.workspace = true
+
+[dependencies]
+egoc = { workspace = true }
+rand = { workspace = true }
+
+[[bin]]
+name = "egoc-auction"
+path = "src/main.rs"

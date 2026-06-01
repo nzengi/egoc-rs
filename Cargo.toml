@@ -8,6 +8,7 @@ members = [
     "crates/egoc-ivc",
     "crates/egoc",
     "crates/egoc-bench",
+    "crates/egoc-auction",
 ]
 
 [workspace.package]
